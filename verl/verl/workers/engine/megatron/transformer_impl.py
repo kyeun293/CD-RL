@@ -163,6 +163,8 @@ class MegatronEngine(BaseEngine):
         self.dtype = PrecisionType.to_dtype(self.param_dtype)
 
         override_transformer_config = mapping_string_to_attn_backend({**self.engine_config.override_transformer_config})
+        if self.enable_routing_replay:
+            override_transformer_config["enable_routing_replay"] = True
 
         self.provider = None
         self.vanilla_bridge = self.engine_config.vanilla_mbridge
@@ -227,9 +229,6 @@ class MegatronEngine(BaseEngine):
             for key, value in override_transformer_config.items():
                 setattr(provider, key, value)
 
-            if self.enable_routing_replay:
-                provider.enable_routing_replay = True
-
             provider.finalize()
             self.provider = provider
             tf_config = None  # Will be set after model creation
@@ -237,13 +236,6 @@ class MegatronEngine(BaseEngine):
 
         if not self.bridge:
             self.weight_converter = get_mcore_weight_converter(self.model_config.hf_config, self.dtype)
-
-        # Set enable_routing_replay directly on tf_config instead of passing through
-        # override_transformer_config, because dataclass subclasses like MLATransformerConfig
-        # generate their own __init__ and don't inherit the patched TransformerConfig.__init__
-        # that accepts this kwarg.
-        if self.enable_routing_replay and tf_config is not None:
-            tf_config.enable_routing_replay = True
 
         if torch.distributed.get_rank() == 0:
             if tf_config is not None:
@@ -268,12 +260,10 @@ class MegatronEngine(BaseEngine):
 
         wrap_config = McoreModuleWrapperConfig(
             is_value_model=self.is_value_model,
+            share_embeddings_and_output_weights=self.model_config.share_embeddings_and_output_weights,
             wrap_with_ddp=wrap_with_ddp,
             use_distributed_optimizer=self.engine_config.use_distributed_optimizer,
         )
-        if self.is_value_model:
-            self.model_config.hf_config.tie_word_embeddings = False
-
         module, updated_tf_config = make_megatron_module(
             wrap_config=wrap_config,
             tf_config=self.tf_config,
@@ -667,15 +657,12 @@ class MegatronEngine(BaseEngine):
             forward_only=forward_only,
         )
 
-        if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
-            # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,
-            # because save_loss_to_tracker uses avg_group=DP+CP group.
-            # Only collect metrics on the src rank afterward.
+        if self.model_config.mtp.enable and self.is_mp_src_rank_with_outputs():
+            # add mtp_losses
             metrics = get_megatron_mtp_loss(n_micro_batch)
-            if self.is_mp_src_rank_with_outputs():
-                if "metrics" not in losses_reduced[0]:
-                    losses_reduced[0]["metrics"] = {}
-                losses_reduced[0]["metrics"].update(metrics)
+            if "metrics" not in losses_reduced[0]:
+                losses_reduced[0]["metrics"] = {}
+            losses_reduced[0]["metrics"].update(metrics)
 
         if RouterReplayHelper.is_r2_record_action(self.tf_config):
             if self.tf_config.virtual_pipeline_model_parallel_size is not None:
@@ -710,20 +697,16 @@ class MegatronEngine(BaseEngine):
         peft_config = None
         non_merge_lora_sync = self.peft_cls is not None and not self.model_config.lora.get("merge", False)
         adapter_only = base_sync_done and non_merge_lora_sync
-        if non_merge_lora_sync:
-            peft_config = build_peft_config_for_vllm(self.model_config.lora)
         # when lora adapter only, we only load adapter weights when base sync is done, otherwise load all weights
         load_megatron_model_to_gpu(self.module, load_grad=False, load_frozen_params=not adapter_only)
         if self.vanilla_bridge:
             per_tensor_param = self.bridge.export_weights(self.module)
         elif adapter_only:
+            # Only export adapter weights
+            peft_config = build_peft_config_for_vllm(self.model_config.lora)
             per_tensor_param = self.bridge.export_adapter_weights(self.module)
         else:
-            per_tensor_param = (
-                self.bridge.export_hf_weights(self.module, merge_adapter_weights=False)
-                if non_merge_lora_sync
-                else self.bridge.export_hf_weights(self.module)
-            )
+            per_tensor_param = self.bridge.export_hf_weights(self.module)
             if non_merge_lora_sync:
                 per_tensor_param = add_base_layer_suffix(
                     per_tensor_param, model_type=self.model_config.hf_config.model_type
@@ -1006,7 +989,7 @@ class MegatronEngineWithValueHead(MegatronEngineWithLMHead):
             value_model=True,
             vision_model=hasattr(self.model_config.hf_config, "vision_config"),
             pad_token_id=self.model_config.tokenizer.pad_token_id,
-            data_format="thd" if self.engine_config.use_remove_padding else "bshd",
+            enable_mtp=self.model_config.mtp.enable_train,
         )
 
         return output, partial(postprocess_micro_batch_func, data=batch)

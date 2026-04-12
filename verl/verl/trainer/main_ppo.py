@@ -163,7 +163,10 @@ class TaskRunner:
             actor_rollout_cls = AsyncActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
 
-        elif config.actor_rollout_ref.actor.strategy in {"veomni", "torchtitan", "mindspeed"}:
+        elif (
+            config.actor_rollout_ref.actor.strategy == "veomni"
+            or config.actor_rollout_ref.actor.strategy == "torchtitan"
+        ):
             raise NotImplementedError(
                 f"{config.actor_rollout_ref.actor.strategy} does not support legacy worker implementation"
             )
@@ -199,7 +202,7 @@ class TaskRunner:
 
                 CriticWorker = TrainingWorker
                 print("Using new worker implementation")
-        elif config.critic.strategy in {"veomni", "torchtitan", "mindspeed"}:
+        elif config.critic.strategy == "veomni" or config.critic.strategy == "torchtitan":
             if use_legacy_worker_impl == "disable":
                 from verl.workers.engine_workers import TrainingWorker
 

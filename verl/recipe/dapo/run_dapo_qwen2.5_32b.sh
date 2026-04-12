@@ -1,4 +1,11 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# conda 환경 활성화
+source /home/soo/miniconda3/etc/profile.d/conda.sh
+conda activate cd_rlhf2
+# GPU 설정 (GPU 2,3번 사용)
+GPU_ID=2,3
+export CUDA_VISIBLE_DEVICES=$GPU_ID
+
 set -xeuo pipefail
 
 project_name='DAPO'

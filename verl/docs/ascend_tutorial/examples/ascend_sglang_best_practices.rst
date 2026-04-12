@@ -27,7 +27,8 @@ SGLang 是当前主流的高性能开源推理引擎, 昇腾已经全面原生�
 
 环境构建
 -----------------------------------
-我们在 `quickstart <https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/quick_start/ascend_sglang_quick_start.rst>`_中提供了两种构建环境的方法, 1.从镜像文件DockerFile进行构建 2.从自定义Conda环境进行构建
+我们在quickstart中提供了两种构建环境的方法, 1.从镜像文件DockerFile进行构建 2.从自定义Conda环境进行构建
+
 在本实践中, 我们额外指定verl 的commit id 以避免引入其他问题
 
 .. code-block:: bash
@@ -60,7 +61,7 @@ DAPO-Math-17k: https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k
 
 .. code-block:: bash
 
-    actor_rollout_ref.actor.megatron.use_dist_checkpointing=False \
+    actor_rollout_ref.actor.megatron.use_dist_checkpointing=False
     actor_rollout_ref.actor.megatron.use_mbridge=True
 
 `Qwen2.5-32B`_
@@ -123,7 +124,7 @@ DAPO-Math-17k: https://huggingface.co/datasets/BytedTsinghua-SIA/DAPO-Math-17k
   export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
   export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
   export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8
   # 修改为当前需要跑的用例路径
   DEFAULT_SH="./run_*.sh"
   echo "Use $DEFAULT_SH"
@@ -197,7 +198,7 @@ SOCKET_IFNAME, HCCL_SOCKET_IFNAME, GLOO_SOCKET_IFNAME: 修改为对应通信网�
 3.模型评估
 ^^^^^^^^^^^
 
-不同模型步骤一致,仅以Qwen3-30B为例列举
+不同模型步骤一致,仅以Qwen3-30b为例列举
 
 我们通过 AISBenchmark 评估模型,该工具支持vllm/sglang多种推理后端的评估
 
