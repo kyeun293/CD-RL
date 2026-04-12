@@ -289,27 +289,6 @@ def postprocess_packed_seqs_for_dict_output(
     return ret
 
 
-def preprocess_for_mindspeed(input_ids, cu_seqlens_padded, seqlens_in_batch_padded, batch_size):
-    if not is_npu_available:
-        return
-    try:
-        from mindspeed.core.context_parallel.get_batch_utils import set_actual_seq_len
-        from mindspeed.utils import set_position_ids
-
-        set_actual_seq_len(cu_seqlens_padded)
-        # Generate position IDs within each padded segment
-        pack_length = int(seqlens_in_batch_padded.sum().item())
-        position_ids_packed = torch.zeros(pack_length, dtype=torch.int32, device=input_ids.device)
-        for i in range(batch_size):
-            start = cu_seqlens_padded[i].item()
-            end = cu_seqlens_padded[i + 1].item()
-            position_ids_packed[start:end] = torch.arange(end - start, dtype=torch.int32, device=input_ids.device)
-
-        set_position_ids(position_ids_packed.unsqueeze(0).transpose(0, 1).contiguous())
-    except ImportError as e:
-        logger.warning(f"Could not import mindspeed modules, skipping position_id setting: {e}")
-
-
 ### No padding versions for model engine
 ### inputs are nested tensors
 def preprocess_thd_engine(
@@ -353,8 +332,6 @@ def preprocess_thd_engine(
     cu_seqlens[1:] = torch.cumsum(seqlens_in_batch, dim=0)
     cu_seqlens_padded = torch.zeros(batch_size + 1, dtype=torch.int32, device=input_ids.device)
     cu_seqlens_padded[1:] = torch.cumsum(seqlens_in_batch_padded, dim=0)
-
-    preprocess_for_mindspeed(input_ids, cu_seqlens_padded, seqlens_in_batch_padded, batch_size)
 
     if use_fp8_padding:
         # Pad the last sequence so total length is divisible by total_align for TE
@@ -660,16 +637,15 @@ def postprocess_bshd_engine(
     """
     Postprocess bshd sequences
     """
+    assert output.shape[:2] == attention_mask.shape, (
+        f"output.shape: {output.shape}, attention_mask.shape: {attention_mask.shape}"
+    )
     if not post_process:
         return output
 
     if is_npu_available:
         attention_mask = attention_mask.diagonal(dim1=-2, dim2=-1).squeeze(1)
         attention_mask = ~attention_mask.bool()
-
-    assert output.shape[:2] == attention_mask.shape, (
-        f"output.shape: {output.shape}, attention_mask.shape: {attention_mask.shape}"
-    )
 
     cp_size = mpu.get_context_parallel_world_size()
     cp_rank = mpu.get_context_parallel_rank()
@@ -726,41 +702,3 @@ def postprocess_bshd_engine(
     output_new_tensor = torch.nested.as_nested_tensor(output_new, layout=torch.jagged)
 
     return output_new_tensor
-
-
-def build_vlm_attn_mask_thd(input_ids: torch.Tensor, pad_token_id: int = None):
-    input_ids_rmpad = input_ids.to_padded_tensor(pad_token_id)
-
-    if is_npu_available:
-        return input_ids_rmpad, None
-
-    seqlens_in_batch = input_ids.offsets().diff()
-    attention_mask = torch.zeros_like(input_ids_rmpad, dtype=torch.bool)
-    for i, seqlen in enumerate(seqlens_in_batch):
-        attention_mask[i, :seqlen] = True
-
-    return input_ids_rmpad, attention_mask
-
-
-def build_vlm_attn_mask_bshd(input_ids: torch.Tensor, batch_size: int, pad_token_id: int = None):
-    seqlens_in_batch = input_ids.offsets().diff()
-    max_seqlen = seqlens_in_batch.max().item()
-
-    # For CP, sequence length must be divisible by (2 * cp_size), and for SP by tp_size.
-    tp_size = mpu.get_tensor_model_parallel_world_size()
-    cp_size = mpu.get_context_parallel_world_size()
-    align_size = math.lcm(tp_size, 2 * cp_size) if cp_size > 1 else tp_size
-    if align_size > 1:
-        pad_size = (align_size - max_seqlen % align_size) % align_size
-        max_seqlen += pad_size
-
-    input_ids_bshd = input_ids.to_padded_tensor(pad_token_id, output_size=(batch_size, max_seqlen))
-
-    if is_npu_available:
-        return input_ids_bshd, None
-
-    attention_mask = torch.zeros_like(input_ids_bshd, dtype=torch.bool)
-    for i, seqlen in enumerate(seqlens_in_batch):
-        attention_mask[i, :seqlen] = True
-
-    return input_ids_bshd, attention_mask
