@@ -1166,13 +1166,22 @@ class RayPPOTrainer:
             if self.ref_in_actor:
                 output = self.actor_rollout_wg.compute_log_prob(batch_td)
             else:
+                # print(f"ray_trainer.py {batch_td.batch_size}", flush=True) #256
                 output = self.ref_policy_wg.compute_ref_log_prob(batch_td)
             # gather output
             log_probs = tu.get(output, "log_probs")
             # step 4. No padding to padding
             log_probs = no_padding_2_padding(log_probs, batch_td)
             # step 5: rebuild a tensordict and convert to dataproto
-            ref_log_prob = tu.get_tensordict({"ref_log_prob": log_probs.float()})
+            tensordict_data = {"ref_log_prob": log_probs.float()}
+
+            # hidden states가 있으면 반환
+            if batch.meta_info['output_hidden_states']:
+                hidden_states = tu.get(output, "hidden_states", default=None)
+                hidden_states = no_padding_2_padding(hidden_states, batch_td, is_hidden_states=True)
+                tensordict_data["ref_hidden_states"] = hidden_states
+
+            ref_log_prob = tu.get_tensordict(tensordict_data)
             ref_log_prob = DataProto.from_tensordict(ref_log_prob)
         else:
             ref_log_prob = self.ref_policy_wg.compute_ref_log_prob(batch)
@@ -1194,7 +1203,7 @@ class RayPPOTrainer:
             log_probs = tu.get(output, "log_probs")
             routed_experts = tu.get(output, "routed_experts")
 
-            old_log_prob_mfu = tu.get(output, "metrics")["mfu"]
+            old_log_prob_mfu = tu.get(output, "metrics").get("mfu", 0) #output에 mfu metric이 없음
             # step 4. No padding to padding
             entropy = no_padding_2_padding(entropy, batch_td)
             log_probs = no_padding_2_padding(log_probs, batch_td)
@@ -1210,6 +1219,21 @@ class RayPPOTrainer:
             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
             old_log_prob_mfu = 0
         return old_log_prob, old_log_prob_mfu
+
+    def _compute_actor_hidden_states(self, batch: DataProto) -> torch.Tensor:
+        """
+        actor로 hidden states만 추출. log_prob/entropy 계산 없음.
+        """
+        batch_td = batch.to_tensordict()
+        batch_td = left_right_2_no_padding(batch_td)
+        tu.assign_non_tensor(batch_td, calculate_entropy=False, compute_loss=False, output_hidden_states=True)
+        
+        output = self.actor_rollout_wg.compute_log_prob(batch_td)
+        
+        hidden_states = tu.get(output, "hidden_states", default=None)
+        assert hidden_states is not None, "output_hidden_states=True 설정 필요"
+        
+        return hidden_states  # (batch_size, seq_len, hidden_dim)
 
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout
@@ -1444,8 +1468,6 @@ class RayPPOTrainer:
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
                             batch_reward = self._compute_reward_colocate(batch)
                             batch = batch.union(batch_reward)
-
-                        # --- 여기에 Curiosity Reward 계산 로직 삽입 가능 ---
 
                         # extract reward_tensor and reward_extra_infos_dict for training
                         reward_tensor, reward_extra_infos_dict = extract_reward(batch)

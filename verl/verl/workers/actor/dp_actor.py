@@ -444,7 +444,7 @@ class DataParallelPPOActor(BasePPOActor):
                 - ``log_probs``: tensor of shape [batch_size, response_length]. torch.float32.
                 - ``entropys``: tensor of shape [batch_size, response_length]. torch.float32.
                 - ``sum_pi_squared``: tensor of shape [batch_size, response_length]. torch.float32.
-        """
+        """  
         calculate_sum_pi_squared = self.config.get("calculate_sum_pi_squared", False)
 
         # set to eval

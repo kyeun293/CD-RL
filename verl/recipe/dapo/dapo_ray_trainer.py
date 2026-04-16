@@ -42,11 +42,41 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.profiler import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
 
+from icm.icm_module import ICM
+from transformers import get_scheduler
+from tensordict import TensorDict
 
 class RayDAPOTrainer(RayPPOTrainer):
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
     """
+    def init_workers(self):
+        super().init_workers()
+
+        if not self.config.algorithm.use_icm:
+            return
+        
+        # --- ICM 모델 초기화 ---
+        from transformers import AutoConfig
+        model_config = AutoConfig.from_pretrained(self.config.actor_rollout_ref.model.path)
+        hidden_size = model_config.hidden_size
+        intermediate_size = self.config.icm.icm_intermediate_size
+
+        self.icm = ICM(hidden_size, intermediate_size)
+        self.icm = self.icm.to(torch.bfloat16)
+
+        # Optimizer
+        self.icm_optimizer = torch.optim.Adam(
+            self.icm.parameters(),
+            lr=self.config.icm.lr,
+            betas=(0.9, 0.95),
+        )
+        self.icm_lr_scheduler = get_scheduler(
+            name=self.config.icm.lr_scheduler_type,
+            optimizer=self.icm_optimizer,
+            num_warmup_steps=self.config.icm.warmup_steps,
+            num_training_steps=self.config.trainer.total_epochs * len(self.train_dataloader),
+        )
 
     def compute_kl_related_metrics(self, batch: DataProto, metrics: dict, timing_raw: dict):
         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -74,8 +104,187 @@ class RayDAPOTrainer(RayPPOTrainer):
         if self.use_reference_policy:
             # compute reference log_prob
             with marked_timer("ref", timing_raw, "olive"):
-                ref_log_prob = self._compute_ref_log_prob(batch)
-                batch = batch.union(ref_log_prob)
+                if "ref_log_prob" not in batch.batch: # 이미 compute_ref_kl_hidden_states에서 계산되어 있을 수 있음
+                    ref_log_prob = self._compute_ref_log_prob(batch)
+                    batch = batch.union(ref_log_prob)
+                else:
+                    print("ref_log_prob already in batch, skipping computation", flush=True)
+
+        return batch
+
+    def check_step_boundary(self, step_boundary_list, response_lengths):
+        for i in range(len(step_boundary_list)):
+            resp_start, resp_end = 0, response_lengths[i]-1
+            if step_boundary_list[i][0] != resp_start:
+                step_boundary_list[i] = [resp_start] + step_boundary_list[i]
+            if step_boundary_list[i][-1] != resp_end:
+                step_boundary_list[i] = step_boundary_list[i] + [resp_end]
+        
+        return step_boundary_list
+
+    def compute_ref_kl_hidden_states(self, batch: DataProto):
+
+        batch.meta_info["output_hidden_states"] = True  # 추가
+        ref_log_prob = self._compute_ref_log_prob(batch)
+        batch = batch.union(ref_log_prob)
+        batch.meta_info["output_hidden_states"] = False
+
+        return batch
+    
+    def get_actor_step_embs_chunk(self, token_ids_list: list[torch.Tensor]) -> list[torch.Tensor]:
+        """
+            token_ids_list: 여러 reasoning step 시퀀스가 담긴 리스트
+        """
+        bs = len(token_ids_list)
+
+        # dp_size의 배수로 패딩
+        dp_size = self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes \
+                // self.config.actor_rollout_ref.actor.ulysses_sequence_parallel_size
+        padded_bs = ((bs + dp_size - 1) // dp_size) * dp_size
+        pad_count = padded_bs - bs
+        padded_token_ids_list = token_ids_list + [token_ids_list[0]] * pad_count
+
+        # dummy prompt 추가해서 데이터 만들기
+        bos_token_id = 0
+        max_resp_len = max(ids.shape[0] for ids in padded_token_ids_list)
+        max_input_len = max_resp_len + 1  # +1 for bos token
+
+        # input_ids = torch.zeros(padded_bs, max_input_len, dtype=torch.long)
+        # attention_mask = torch.zeros(padded_bs, max_input_len, dtype=torch.long)
+        # position_ids = torch.zeros(padded_bs, max_input_len, dtype=torch.long)
+        # prompt_ids = torch.full((padded_bs, 1), bos_token_id, dtype=torch.long)  # (batch_size, 1)
+        # response_ids = torch.zeros(padded_bs, max_resp_len, dtype=torch.long)  # (batch_size, max_resp_len)
+        # response_mask = torch.zeros(padded_bs, max_resp_len, dtype=torch.long)
+
+        input_ids = torch.zeros(padded_bs, max_resp_len, dtype=torch.long)
+        attention_mask = torch.zeros(padded_bs, max_resp_len, dtype=torch.long)
+        position_ids = torch.zeros(padded_bs, max_resp_len, dtype=torch.long)
+        prompt_ids = torch.zeros(padded_bs, 0, dtype=torch.long)  # empty prompt
+        response_ids = torch.zeros(padded_bs, max_resp_len, dtype=torch.long)
+        response_mask = torch.zeros(padded_bs, max_resp_len, dtype=torch.long)
+
+        for i, ids in enumerate(padded_token_ids_list):
+            l = ids.shape[0]
+            # input_ids[i, 0] = bos_token_id
+            # input_ids[i, 1:l+1] = ids
+            # attention_mask[i, :l+1] = 1
+            # position_ids[i, :l+1] = torch.arange(l+1)
+            # response_ids[i, :l] = ids
+            # response_mask[i, :l] = 1
+
+            input_ids[i, :l] = ids
+            attention_mask[i, :l] = 1
+            position_ids[i, :l] = torch.arange(l)
+            response_ids[i, :l] = ids
+            response_mask[i, :l] = 1
+            
+        # actor 모델로 hidden state 구하기
+        step_batch = DataProto(batch=TensorDict(
+            {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "responses": response_ids,
+                "response_mask": response_mask,
+                "position_ids": position_ids,
+                "prompts": prompt_ids,
+            },
+            batch_size=[padded_bs],
+        ))
+        step_batch.meta_info["output_hidden_states"] = True
+        step_batch.meta_info["compute_loss"] = False
+        step_batch.meta_info["temperature"] = self.config.actor_rollout_ref.rollout.temperature
+
+        step_hidden_states = self._compute_actor_hidden_states(step_batch)
+
+        # 각 step의 마지막 토큰의 hidden state만 추출
+        step_last_hidden_states = [
+            step_hidden_states[i, response_mask[i].sum() - 1]
+            for i in range(bs) # padded_bs가 아닌 원래 bs까지만
+        ]
+
+        # print(f"step_hidden_states shape: {step_hidden_states.shape}", flush=True) # torch.Size([num_steps_in_batch, seq_len, hidden_dim])
+
+        return step_last_hidden_states
+
+    def get_actor_step_embs(self, batch, step_boundary_list):
+        """
+        new_batch: DataProto, responses 토큰 포함
+        step_idx_list: [[80, 110], [80, 110], ...] 각 response 내 step 경계 인덱스
+        
+        returns: list of list of tensors
+            - 외부 리스트: 각 response
+            - 내부 리스트: 각 step의 임베딩 (hidden_dim,)
+        """
+        responses = batch.batch["responses"]
+        batch_size = responses.shape[0]
+
+        # 1) 모든 response의 모든 step을 하나의 리스트로 flatten
+        all_steps = []       # 모든 step의 input_ids
+        step_map = []        # (response_idx, step_idx) 복원용 맵
+        
+        for idx in range(batch_size):
+            response_sample = responses[idx]            
+            boundaries = step_boundary_list[idx]
+            
+            for step_idx in range(len(boundaries) - 1):
+                start = boundaries[step_idx]
+                end = boundaries[step_idx + 1]
+                step_tokens = response_sample[start:end]
+                all_steps.append(step_tokens)
+                step_map.append((idx, step_idx))
+
+
+        # 2) chunk 단위로 모델에 입력하여 step별 hidden state 구하기
+        step_last_hidden_states = [[] for _ in range(batch_size)]
+        for chunk_start in range(0, len(all_steps), self.config.icm.step_emb_chunk_size):
+            chunk_steps = all_steps[chunk_start : chunk_start + self.config.icm.step_emb_chunk_size]
+            chunk_hidden_states = self.get_actor_step_embs_chunk(chunk_steps)
+
+            # chunk_hidden_states는 chunk_steps의 step별 hidden state 리스트
+            for i, hidden_state in enumerate(chunk_hidden_states):
+                global_step_idx = chunk_start + i
+                resp_idx, step_idx = step_map[global_step_idx]
+                step_last_hidden_states[resp_idx].append(hidden_state)
+
+        step_last_hidden_states = [
+            torch.stack(hidden_states, dim=0)  # (num_steps, hidden_dim)
+            for hidden_states in step_last_hidden_states
+        ]
+
+        return step_last_hidden_states
+    
+    def whiten(self, values, shift_mean=True):
+        mean, var = torch.mean(values), torch.var(values, unbiased=False)
+        whitened = (values - mean) * torch.rsqrt(var + 1e-8)
+        if not shift_mean:
+            whitened += mean
+        return whitened
+    
+    def intrinsic_reward(self, next_state, next_state_hat):
+        intrinsic_reward = 0.5 * (next_state - next_state_hat).norm(2, dim=-1)
+        intrinsic_reward = self.whiten(intrinsic_reward)
+        intrinsic_reward = intrinsic_reward.detach()
+        return intrinsic_reward
+    
+    def add_intrinsic_reward(self, batch, intrinsic_reward, pair_map, step_boundary_list):
+        """
+        batch: DataProto
+        intrinsic_reward: (num_steps,) 각 step에 대한 intrinsic reward 텐서
+        pair_map: [(data_idx, step_idx), ...] 각 step이 어떤 데이터의 어떤 step인지 매핑하는 리스트 (마지막 step은 없음. ICM에서는 다음 step을 예측하는 것이니까)
+        step_boundary_list: [[step_boundary], ...] 각 response의 step boundary 정보
+
+        batch에 token_level_intrinsic_rewards 추가하기
+        """
+        print(f"pair_map len: {len(pair_map)}, intrinsic_reward len: {len(intrinsic_reward)}", flush=True)
+        for k, (data_idx, step_idx) in enumerate(pair_map):
+            boundary = step_boundary_list[data_idx]
+            start = boundary[step_idx]
+            end = boundary[step_idx + 1]
+
+            if self.config.icm.intrinsic_reward_token == "all_step_tokens":
+                batch.batch["token_level_rewards"][data_idx, start:end] += self.config.icm.eta * intrinsic_reward[k].item()
+            elif self.config.icm.intrinsic_reward_token == "last_step_token":
+                batch.batch["token_level_rewards"][data_idx, end - 1] += self.config.icm.eta * intrinsic_reward[k].item()
 
         return batch
 
@@ -202,6 +411,62 @@ class RayDAPOTrainer(RayPPOTrainer):
                     new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     new_batch = new_batch.union(gen_batch_output)
 
+                    if self.config.algorithm.use_icm:
+                        bs = len(new_batch.batch)
+                        max_resp_len = new_batch.batch["responses"].shape[1]
+                        resp_lengths = new_batch.batch["response_mask"].sum(dim=-1).tolist()
+                        # print(f"batch_size: {bs}", flush=True) # 256
+                        # print(f"max_resp_len: {max_resp_len}", flush=True) # 2048
+                        # print(f"resp_lengths: {resp_lengths}", flush=True) # [15, 15, 15, 11, 6, 9, ...]
+
+                        # 각 response 내 step 경계 위치 (response 기준 인덱스)
+                        step_boundary_list = [[1, 3]] * (bs-1)
+                        step_boundary_list = [[1, 3, 4]] + step_boundary_list  # 첫 번째 샘플은 step이 하나 더 있다고 가정
+                        
+                        # step boundary가 response 시작/끝점 포함하도록 보정
+                        step_boundary_list = self.check_step_boundary(step_boundary_list, resp_lengths) 
+
+                        # reference 모델로 response 부분 hidden state 구하기
+                        new_batch = self.compute_ref_kl_hidden_states(new_batch)
+                        ref_hidden_states = new_batch.batch["ref_hidden_states"]
+                        # 각 step 경계 위치마다 hidden state 뽑기
+                        ref_hidden_states = [
+                            ref_hidden_states[i, step_boundary_list[i], :]
+                            for i in range(len(step_boundary_list))
+                        ]
+                        # print(f"ref_hidden_states len: {len(ref_hidden_states)}", flush=True) # batch size = 256
+                        # print(f"ref_hidden_states[0] shape: {ref_hidden_states[0].shape}", flush=True) # step 수: torch.Size([5, 2048])
+                        # print(f"ref_hidden_states[1] shape: {ref_hidden_states[1].shape}", flush=True) # step 수: torch.Size([4, 2048])
+
+                        # actor 모델로 각 step의 hidden state 구하기
+                        actor_step_embs = self.get_actor_step_embs(new_batch, step_boundary_list)
+                        # print(f"actor_step_embs len: {len(actor_step_embs)}", flush=True) # batch size = 256
+                        # print(f"actor_step_embs[0] shape: {actor_step_embs[0].shape}", flush=True) # step 수: torch.Size([4, 2048])
+                        # print(f"actor_step_embs[1] shape: {actor_step_embs[1].shape}", flush=True) # step 수: torch.Size([3, 2048])
+
+                        # ICM 모델로 intrinsic reward 계산하기
+                        s_t_batch, a_t_batch, s_t1_batch, pair_map = self.icm.prepare_icm_input(ref_hidden_states, actor_step_embs)
+                        # print(f"s_t_batch shape: {s_t_batch.shape if s_t_batch is not None else None}", flush=True) # torch.Size([num_steps, hidden_dim])
+                        # print(f"a_t_batch shape: {a_t_batch.shape if a_t_batch is not None else None}", flush=True) # torch.Size([num_steps, action_dim])
+                        # print(f"s_t1_batch shape: {s_t1_batch.shape if s_t1_batch is not None else None}", flush=True) # torch.Size([num_steps, hidden_dim])
+                        # print(f"pair_map: {pair_map[:10]} (showing first 10)", flush=True) # [(data_idx, step_idx), ...]
+
+                        if s_t_batch is not None:
+                            next_state, next_state_hat = self.icm(s_t_batch, s_t1_batch, a_t_batch)
+                            # print(f"next_state shape: {next_state.shape}", flush=True) # torch.Size([num_steps, hidden_dim])
+                            # print(f"next_state_hat shape: {next_state_hat.shape}", flush=True) # torch.Size([num_steps, hidden_dim])
+
+                            icm_loss = self.icm.icm_loss(next_state, next_state_hat)
+                            # print(f"icm_loss: {icm_loss.item()}", flush=True) # 5.6551690101623535
+
+                            intrinsic_reward = self.intrinsic_reward(next_state, next_state_hat)
+                            # print(f"intrinsic_reward shape: {intrinsic_reward.shape}", flush=True) # torch.Size([num_steps,])
+
+                            self.icm_optimizer.zero_grad()
+                            icm_loss.backward()
+                            self.icm_optimizer.step()
+                            self.icm_lr_scheduler.step()
+
                     if self.config.algorithm.use_kl_in_reward:
                         # We need these metrics for apply_kl_penalty if using kl in reward
                         new_batch = self.compute_kl_related_metrics(new_batch, metrics, timing_raw)
@@ -236,6 +501,13 @@ class RayDAPOTrainer(RayPPOTrainer):
                             )  # TODO: This will be cleared if we use multiple genenration batches
                         else:
                             new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"]
+
+                    # intrinsic reward을 token_level_rewards에 더하기
+                    print(f"before adding intrinsic reward: {new_batch.batch['token_level_rewards'][0][:10]} (showing first 10 tokens of first sample)", flush=True) # tensor([0., 0., 0., ...])
+                    if self.config.algorithm.use_icm:
+                        new_batch = self.add_intrinsic_reward(new_batch, intrinsic_reward, pair_map, step_boundary_list)
+                    print(f"after adding intrinsic reward: {new_batch.batch['token_level_rewards'][0][:10]} (showing first 10 tokens of first sample)", flush=True) # tensor([ 0.5547, -0.7383, -0.7383, ...])
+
 
                     if not self.config.algorithm.filter_groups.enable:
                         batch = new_batch
@@ -298,6 +570,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                             traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
                             batch = batch[:traj_bsz]
 
+                    # print(f"batch: {batch}", flush=True)
                     self.checkpoint_manager.sleep_replicas()
 
                     # === Updating ===

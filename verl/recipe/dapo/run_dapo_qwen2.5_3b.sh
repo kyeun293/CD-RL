@@ -12,6 +12,7 @@ NGPUS_PER_NODE=2
 # current directory 이동
 basepath=/home/soo/yejin/verl
 cd $basepath
+export PYTHONPATH=$basepath:$PYTHONPATH
 
 # 기록
 project_name='DAPO'
@@ -44,10 +45,10 @@ loss_agg_mode="token-mean"
 enable_filter_groups=False
 filter_groups_metric=acc
 max_num_gen_batches=1            # 8 -> 1 (생성 오버헤드 감소)
-train_prompt_bsz=512              # 8 -> 64 (전체 학습 효율 8배 향상)
+train_prompt_bsz=32              # 8 -> 64 (전체 학습 효율 8배 향상)
 gen_prompt_bsz=$((train_prompt_bsz * 2))
 n_resp_per_prompt=4 
-train_prompt_mini_bsz=128          # 2 -> 8 (학습 단계 속도 향상)
+train_prompt_mini_bsz=4          # 2 -> 8 (학습 단계 속도 향상)
 
 # Paths
 # Ray
@@ -68,11 +69,21 @@ val_top_p=0.7
 
 # Performance Related Parameter
 sp_size=1 # GPU 2대, sp는 노드 내 GPU 수 약수여야 함
-gen_tp=1
+gen_tp=$NGPUS_PER_NODE
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$((max_prompt_length + max_response_length))
 infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
 offload=False
+
+# 추가한 인자
+use_icm=True
+step_emb_chunk_size=32
+icm_intermediate_size=8192
+icm_lr=1e-4
+icm_lr_scheduler_type="linear"
+icm_warmup_steps=10
+icm_intrinsic_reward_token="all_step_tokens" # "last_step_token" or "all_step_tokens"
+icm_eta=0.5
 
 python3 -m recipe.dapo.main_dapo \
     data.train_files="${TRAIN_FILE}" \
@@ -87,6 +98,14 @@ python3 -m recipe.dapo.main_dapo \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
+    algorithm.use_icm=${use_icm} \
+    +icm.step_emb_chunk_size=${step_emb_chunk_size} \
+    +icm.icm_intermediate_size=${icm_intermediate_size} \
+    +icm.lr=${icm_lr} \
+    +icm.lr_scheduler_type=${icm_lr_scheduler_type} \
+    +icm.warmup_steps=${icm_warmup_steps} \
+    +icm.intrinsic_reward_token=${icm_intrinsic_reward_token} \
+    +icm.eta=${icm_eta} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
@@ -114,7 +133,7 @@ python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.20 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.60 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \

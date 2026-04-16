@@ -1,3 +1,6 @@
+models/
+ckpts/
+*.whl
 **/*.pt
 **/checkpoints
 **/wget-log

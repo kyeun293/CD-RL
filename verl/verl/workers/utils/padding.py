@@ -96,7 +96,7 @@ def left_right_2_no_padding(data: TensorDict) -> TensorDict:
     return data
 
 
-def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor:
+def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict, is_hidden_states: bool = False) -> torch.Tensor:
     """Slice response from unpad model output.
 
     Args:
@@ -137,7 +137,10 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
         pad_size = max_response_len - resp_len
         # left-shift model output by one token for log_probs/values
-        response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (*skip_padding, 0, pad_size)))
+        if is_hidden_states:
+            response_list.append(F.pad(values[seq_offset - resp_len : seq_offset], (*skip_padding, 0, pad_size)))
+        else:
+            response_list.append(F.pad(values[seq_offset - resp_len - 1 : seq_offset - 1], (*skip_padding, 0, pad_size)))
 
     output = torch.stack(response_list, dim=0)
     return output
