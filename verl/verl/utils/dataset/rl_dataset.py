@@ -115,6 +115,9 @@ class RLHFDataset(Dataset):
         self.filter_overlong_prompts = config.get("filter_overlong_prompts", True)
         self.apply_chat_template_kwargs = config.get("apply_chat_template_kwargs", {})
 
+        # Step-by-step instruction to inject into the system message
+        self.step_instruction = config.get("step_instruction", None)
+
         self.tool_config_path = config.get("tool_config_path", None)
         self.tool_schemas = None
         if self.tool_config_path:
@@ -359,7 +362,16 @@ class RLHFDataset(Dataset):
     def __getitem__(self, item):
         """For rollout, apply_chat_template has been moved to AgentLoop, so we only return raw_prompt here."""
         row_dict: dict = self.dataframe[item]
-        row_dict["raw_prompt"] = self._build_messages(row_dict)
+        messages = self._build_messages(row_dict)
+
+        # Inject step-by-step instruction into the system message if configured
+        if self.step_instruction:
+            if messages and messages[0]["role"] == "system":
+                messages[0]["content"] = messages[0]["content"] + "\n\n" + self.step_instruction
+            else:
+                messages.insert(0, {"role": "system", "content": self.step_instruction})
+
+        row_dict["raw_prompt"] = messages
 
         # TODO(wuxibin): We still need a dummy tensor to make sure DataProto.batch is not empty.
         # Remove this after deprecate DataProto by TensorDict.
