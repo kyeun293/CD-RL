@@ -8,6 +8,10 @@ defaults:
 
 data:
   gen_batch_size: ${data.train_batch_size}
+  # System message appended to prompts instructing the model to reason step by step.
+  # Each step should be separated by step_sep (default: blank line).
+  # Set to null to disable.
+  step_instruction: "Please solve the problem by breaking your reasoning into detailed, granular steps. Use the following format and include as many steps as needed — do not skip or combine steps:\n\nStep 1: [your reasoning]\n\nStep 2: [your reasoning]\n\nStep 3: [your reasoning]\n\n(continue as needed)\n\nAt the end, output the final answer using the exact format: \\boxed{your_answer}."
 
 reward:
   reward_manager:
@@ -19,6 +23,13 @@ reward:
       penalty_factor: 0.0
       log: False
     max_resp_len: null
+    # Step separator for parsing responses into reasoning steps.
+    # Set to null to disable separator-based parsing.
+    step_sep: "\n\n"
+    # Path to the Qwen2.5-7B-PRM-MATH-Instruct model for step-level reward scoring.
+    # e.g. prm_model_path: Qwen/Qwen2.5-7B-PRM-MATH-Instruct
+    # Set to null to disable PRM scoring.
+    prm_model_path: null
 
 algorithm:
   filter_groups:

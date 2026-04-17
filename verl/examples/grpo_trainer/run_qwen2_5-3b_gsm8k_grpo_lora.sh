@@ -2,23 +2,11 @@
 # conda 환경 활성화
 source /home/soo/miniconda3/etc/profile.d/conda.sh
 conda activate verl
-# GPU 설정 (GPU 3번 사용)
-export CUDA_VISIBLE_DEVICES=2
-    
-# current directory 이동
-basepath=/home/soo/yejin/verl
-cd $basepath
-export PYTHONPATH=/home/soo/yejin/verl:$PYTHONPATH
-
-# 모델 저장할 디렉토리 생성
-MODEL_OUTPUT=$basepath/models/qwen2.5-3b-gsm8k-grpo-lora
-mkdir -p $MODEL_OUTPUT
-
-# 기록
-LOG_OUTPUT=$basepath/my_scripts/logs
-mkdir -p $LOG_OUTPUT
 
 set -x
+export CUDA_VISIBLE_DEVICES=7
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export RAY_TMPDIR="/home/yeeun/ray_tmp"
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -45,7 +33,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=2 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=40 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \

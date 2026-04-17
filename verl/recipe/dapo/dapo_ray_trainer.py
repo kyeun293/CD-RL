@@ -17,6 +17,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import os
+import re
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -24,6 +25,7 @@ from pprint import pprint
 
 import numpy as np
 import torch
+from omegaconf import OmegaConf
 from tqdm import tqdm
 
 from verl import DataProto
@@ -50,6 +52,19 @@ class RayDAPOTrainer(RayPPOTrainer):
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
     """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        reward_kwargs = OmegaConf.to_container(self.config.reward.reward_kwargs, resolve=True)
+        prm_model_path = reward_kwargs.get("prm_model_path", None)
+        self._step_sep = reward_kwargs.get("step_sep", None)
+        if prm_model_path:
+            from recipe.dapo.prm_scorer import PRMScorer
+            self._prm_scorer = PRMScorer(prm_model_path)
+        else:
+            self._prm_scorer = None
+
+        self.icm = None
+
     def init_workers(self):
         super().init_workers()
 
@@ -77,6 +92,85 @@ class RayDAPOTrainer(RayPPOTrainer):
             num_warmup_steps=self.config.icm.warmup_steps,
             num_training_steps=self.config.trainer.total_epochs * len(self.train_dataloader),
         )
+
+    def _find_sep_positions(self, token_ids):
+        """Return token indices whose decoded string ends with the step separator."""
+        positions = []
+        for j in range(len(token_ids)):
+            tok_str = self.tokenizer.decode([token_ids[j].item()])
+            if tok_str.endswith(self._step_sep):
+                positions.append(j)
+        return positions
+
+    def _attach_parsed_steps(self, batch):
+        all_steps = []
+        all_step_ids = []
+        for i in range(len(batch)):
+            response_ids = batch.batch["responses"][i]
+            response_length = response_ids.shape[-1]
+            valid_len = int(batch.batch["attention_mask"][i][-response_length:].sum().item())
+            valid_response_ids = response_ids[:valid_len]
+
+            if self._step_sep:
+                # Find step boundaries at token level so PRM (text) and ICM (ids) share
+                # the exact same step indices.
+                sep_positions = self._find_sep_positions(valid_response_ids)
+                boundaries = [-1] + sep_positions + [valid_len - 1]
+                step_id_segs = [
+                    valid_response_ids[boundaries[k] + 1 : boundaries[k + 1] + 1]
+                    for k in range(len(boundaries) - 1)
+                    if boundaries[k] + 1 <= boundaries[k + 1]
+                ]
+                step_texts = [
+                    self.tokenizer.decode(seg, skip_special_tokens=True).strip()
+                    for seg in step_id_segs
+                ]
+                # Filter empty segments
+                non_empty = [(t, s) for t, s in zip(step_texts, step_id_segs) if t]
+                step_texts = [t for t, _ in non_empty]
+                step_id_segs = [s for _, s in non_empty]
+
+                # Drop preamble before first numbered step (e.g. "Step 1: ...")
+                first_step_idx = next(
+                    (j for j, t in enumerate(step_texts) if re.match(r"Step\s*\d+", t, re.IGNORECASE)),
+                    0,
+                )
+                step_texts = step_texts[first_step_idx:]
+                step_id_segs = step_id_segs[first_step_idx:]
+            else:
+                step_texts = []
+                step_id_segs = []
+
+            if i == 0:
+                print(f"[PARSE-DEBUG] sample i=0 | num_steps={len(step_texts)}")
+                for si, s in enumerate(step_texts):
+                    print(f"  step[{si}]: {repr(s[:120])}")
+
+            all_steps.append(step_texts)
+            all_step_ids.append(step_id_segs)
+
+        batch.non_tensor_batch["parsed_steps"] = np.array(all_steps, dtype=object)
+        batch.non_tensor_batch["parsed_step_ids"] = np.array(all_step_ids, dtype=object)
+        return batch
+
+    def _score_prm(self, batch):
+        assert self._prm_scorer is not None
+        all_labels = []
+        for i in range(len(batch)):
+            steps = batch.non_tensor_batch["parsed_steps"][i]
+            if steps:
+                prompt_ids = batch.batch["prompts"][i]
+                prompt_length = prompt_ids.shape[-1]
+                valid_prompt_len = int(batch.batch["attention_mask"][i][:prompt_length].sum().item())
+                valid_prompt_ids = prompt_ids[prompt_length - valid_prompt_len:]
+                problem_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
+                labels = self._prm_scorer.score_steps(problem_str, steps)
+            else:
+                labels = []
+            print(f"[PRM-DEBUG] i={i} steps={len(steps)} labels={labels}")
+            all_labels.append(labels)
+        batch.non_tensor_batch["prm_labels"] = np.array(all_labels, dtype=object)
+        return batch
 
     def compute_kl_related_metrics(self, batch: DataProto, metrics: dict, timing_raw: dict):
         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -377,6 +471,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                     # generate a batch
                     with marked_timer("gen", timing_raw, "red"):
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
+                        gen_batch_output = self._attach_parsed_steps(gen_batch_output)
+                        if self._prm_scorer is not None:
+                            gen_batch_output = self._score_prm(gen_batch_output)
                         timing_raw.update(gen_batch_output.meta_info["timing"])
                         gen_batch_output.meta_info.pop("timing", None)
 
