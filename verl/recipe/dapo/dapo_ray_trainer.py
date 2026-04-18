@@ -57,9 +57,12 @@ class RayDAPOTrainer(RayPPOTrainer):
         reward_kwargs = OmegaConf.to_container(self.config.reward.reward_kwargs, resolve=True)
         prm_model_path = reward_kwargs.get("prm_model_path", None)
         self._step_sep = reward_kwargs.get("step_sep", None)
+        print(f"[INIT-DEBUG] step_sep: {repr(self._step_sep)}", flush=True)
+
         if prm_model_path:
             from recipe.dapo.prm_scorer import PRMScorer
             self._prm_scorer = PRMScorer(prm_model_path)
+            print(f"[INIT-DEBUG] Initialized PRMScorer with model path: {prm_model_path}", flush=True)
         else:
             self._prm_scorer = None
 
@@ -104,42 +107,59 @@ class RayDAPOTrainer(RayPPOTrainer):
 
     def _attach_parsed_steps(self, batch):
         all_steps = []
-        all_step_ids = []
+        all_boundaries = []
+
         for i in range(len(batch)):
             response_ids = batch.batch["responses"][i]
-            response_length = response_ids.shape[-1]
-            valid_len = int(batch.batch["attention_mask"][i][-response_length:].sum().item())
-            valid_response_ids = response_ids[:valid_len]
+            response_mask = batch.batch["response_mask"][i]  # 1이 실제 토큰, 0이 패딩
+            valid_response_ids = response_ids[response_mask.bool()]
+            valid_len = int(response_mask.sum().item())
 
             if self._step_sep:
                 # Find step boundaries at token level so PRM (text) and ICM (ids) share
                 # the exact same step indices.
-                sep_positions = self._find_sep_positions(valid_response_ids)
-                boundaries = [-1] + sep_positions + [valid_len - 1]
+                sep_positions = self._find_sep_positions(valid_response_ids) # step separator가 있는 토큰의 인덱스: [60, 209, 314, 394, 453, 519, 645, 672]
+
+                boundaries = [0] + [pos+1 for pos in sep_positions]
+                if boundaries[-1] != valid_len:
+                    boundaries.append(valid_len)
+                # print(f"boundaries: {boundaries} (showing first sample)", flush=True) # [0, 61, 210, 315, 395, 454, 520, 646, 673, 689]
+                
                 step_id_segs = [
-                    valid_response_ids[boundaries[k] + 1 : boundaries[k + 1] + 1]
+                    valid_response_ids[boundaries[k] : boundaries[k + 1]]
                     for k in range(len(boundaries) - 1)
-                    if boundaries[k] + 1 <= boundaries[k + 1]
+                    if boundaries[k] < boundaries[k + 1]
                 ]
                 step_texts = [
                     self.tokenizer.decode(seg, skip_special_tokens=True).strip()
                     for seg in step_id_segs
                 ]
                 # Filter empty segments
-                non_empty = [(t, s) for t, s in zip(step_texts, step_id_segs) if t]
-                step_texts = [t for t, _ in non_empty]
-                step_id_segs = [s for _, s in non_empty]
+                non_empty_step_texts, non_empty_boundaries = [], []
+                for k, t in enumerate(step_texts):
+                    if t:
+                        non_empty_step_texts.append(t)
+                        non_empty_boundaries.append(boundaries[k + 1]) # step 끝나는 인덱스만 저장
+                # print(f"non_empty_step_texts: {non_empty_step_texts} (showing first sample)", flush=True)
+                # print(f"non_empty_boundaries: {non_empty_boundaries} (showing first sample)", flush=True) # [61, 210, 315, 395, 454, 520, 646, 673, 689]
 
                 # Drop preamble before first numbered step (e.g. "Step 1: ...")
                 first_step_idx = next(
-                    (j for j, t in enumerate(step_texts) if re.match(r"Step\s*\d+", t, re.IGNORECASE)),
+                    (j for j, t in enumerate(non_empty_step_texts) if re.match(r"Step\s*\d+", t, re.IGNORECASE)),
                     0,
                 )
-                step_texts = step_texts[first_step_idx:]
-                step_id_segs = step_id_segs[first_step_idx:]
+                
+                step_texts = non_empty_step_texts[first_step_idx:]
+                boundaries = non_empty_boundaries[first_step_idx:]
+                if boundaries:
+                    start = non_empty_boundaries[first_step_idx - 1] if first_step_idx > 0 else 0
+                    boundaries = [start] + boundaries
+
+                # print(f"final boundaries: {boundaries} (showing first sample)", flush=True) # [0, 61, 210, 315, 395, 454, 520, 646, 673, 689]
+
             else:
                 step_texts = []
-                step_id_segs = []
+                boundaries = []
 
             if i == 0:
                 print(f"[PARSE-DEBUG] sample i=0 | num_steps={len(step_texts)}")
@@ -147,10 +167,11 @@ class RayDAPOTrainer(RayPPOTrainer):
                     print(f"  step[{si}]: {repr(s[:120])}")
 
             all_steps.append(step_texts)
-            all_step_ids.append(step_id_segs)
+            all_boundaries.append(boundaries)
 
         batch.non_tensor_batch["parsed_steps"] = np.array(all_steps, dtype=object)
-        batch.non_tensor_batch["parsed_step_ids"] = np.array(all_step_ids, dtype=object)
+        batch.non_tensor_batch["step_boundaries"] = np.array(all_boundaries, dtype=object)
+
         return batch
 
     def _score_prm(self, batch):
@@ -161,13 +182,14 @@ class RayDAPOTrainer(RayPPOTrainer):
             if steps:
                 prompt_ids = batch.batch["prompts"][i]
                 prompt_length = prompt_ids.shape[-1]
-                valid_prompt_len = int(batch.batch["attention_mask"][i][:prompt_length].sum().item())
-                valid_prompt_ids = prompt_ids[prompt_length - valid_prompt_len:]
+                prompt_mask = batch.batch["attention_mask"][i][:prompt_length].bool()
+                valid_prompt_ids = prompt_ids[prompt_mask]
                 problem_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
                 labels = self._prm_scorer.score_steps(problem_str, steps)
             else:
                 labels = []
-            print(f"[PRM-DEBUG] i={i} steps={len(steps)} labels={labels}")
+            if i == 0:
+                print(f"[PRM-DEBUG] i={i} steps={len(steps)} labels={labels}")
             all_labels.append(labels)
         batch.non_tensor_batch["prm_labels"] = np.array(all_labels, dtype=object)
         return batch
@@ -239,16 +261,7 @@ class RayDAPOTrainer(RayPPOTrainer):
         padded_token_ids_list = token_ids_list + [token_ids_list[0]] * pad_count
 
         # dummy prompt 추가해서 데이터 만들기
-        bos_token_id = 0
         max_resp_len = max(ids.shape[0] for ids in padded_token_ids_list)
-        max_input_len = max_resp_len + 1  # +1 for bos token
-
-        # input_ids = torch.zeros(padded_bs, max_input_len, dtype=torch.long)
-        # attention_mask = torch.zeros(padded_bs, max_input_len, dtype=torch.long)
-        # position_ids = torch.zeros(padded_bs, max_input_len, dtype=torch.long)
-        # prompt_ids = torch.full((padded_bs, 1), bos_token_id, dtype=torch.long)  # (batch_size, 1)
-        # response_ids = torch.zeros(padded_bs, max_resp_len, dtype=torch.long)  # (batch_size, max_resp_len)
-        # response_mask = torch.zeros(padded_bs, max_resp_len, dtype=torch.long)
 
         input_ids = torch.zeros(padded_bs, max_resp_len, dtype=torch.long)
         attention_mask = torch.zeros(padded_bs, max_resp_len, dtype=torch.long)
@@ -259,13 +272,6 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         for i, ids in enumerate(padded_token_ids_list):
             l = ids.shape[0]
-            # input_ids[i, 0] = bos_token_id
-            # input_ids[i, 1:l+1] = ids
-            # attention_mask[i, :l+1] = 1
-            # position_ids[i, :l+1] = torch.arange(l+1)
-            # response_ids[i, :l] = ids
-            # response_mask[i, :l] = 1
-
             input_ids[i, :l] = ids
             attention_mask[i, :l] = 1
             position_ids[i, :l] = torch.arange(l)
@@ -303,7 +309,7 @@ class RayDAPOTrainer(RayPPOTrainer):
     def get_actor_step_embs(self, batch, step_boundary_list):
         """
         new_batch: DataProto, responses 토큰 포함
-        step_idx_list: [[80, 110], [80, 110], ...] 각 response 내 step 경계 인덱스
+        step_idx_list: [[0, 30], [30, 110], ...] 각 response 내 step 경계 인덱스
         
         returns: list of list of tensors
             - 외부 리스트: 각 response
@@ -376,9 +382,9 @@ class RayDAPOTrainer(RayPPOTrainer):
             end = boundary[step_idx + 1]
 
             if self.config.icm.intrinsic_reward_token == "all_step_tokens":
-                batch.batch["token_level_rewards"][data_idx, start:end] += self.config.icm.eta * intrinsic_reward[k].item()
+                batch.batch["token_level_rewards"][data_idx, start:end] += self.config.icm.eta * intrinsic_reward[k].item() * batch.non_tensor_batch['prm_labels'][k].item()
             elif self.config.icm.intrinsic_reward_token == "last_step_token":
-                batch.batch["token_level_rewards"][data_idx, end - 1] += self.config.icm.eta * intrinsic_reward[k].item()
+                batch.batch["token_level_rewards"][data_idx, end - 1] += self.config.icm.eta * intrinsic_reward[k].item() * batch.non_tensor_batch['prm_labels'][k].item()
 
         return batch
 
@@ -507,21 +513,14 @@ class RayDAPOTrainer(RayPPOTrainer):
                     # repeat to align with repeated responses in rollout
                     new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     new_batch = new_batch.union(gen_batch_output)
-
+                
                     if self.config.algorithm.use_icm:
-                        bs = len(new_batch.batch)
-                        max_resp_len = new_batch.batch["responses"].shape[1]
-                        resp_lengths = new_batch.batch["response_mask"].sum(dim=-1).tolist()
-                        # print(f"batch_size: {bs}", flush=True) # 256
-                        # print(f"max_resp_len: {max_resp_len}", flush=True) # 2048
-                        # print(f"resp_lengths: {resp_lengths}", flush=True) # [15, 15, 15, 11, 6, 9, ...]
-
                         # 각 response 내 step 경계 위치 (response 기준 인덱스)
-                        step_boundary_list = [[1, 3]] * (bs-1)
-                        step_boundary_list = [[1, 3, 4]] + step_boundary_list  # 첫 번째 샘플은 step이 하나 더 있다고 가정
+                        step_boundary_list = new_batch.non_tensor_batch["step_boundaries"].tolist()
+                        print(f"step_boundary_list: {step_boundary_list[:5]} (showing first 5 samples)", flush=True)
                         
-                        # step boundary가 response 시작/끝점 포함하도록 보정
-                        step_boundary_list = self.check_step_boundary(step_boundary_list, resp_lengths) 
+                        # # step boundary가 response 시작/끝점 포함하도록 보정
+                        # step_boundary_list = self.check_step_boundary(step_boundary_list, resp_lengths) 
 
                         # reference 모델로 response 부분 hidden state 구하기
                         new_batch = self.compute_ref_kl_hidden_states(new_batch)
@@ -531,15 +530,18 @@ class RayDAPOTrainer(RayPPOTrainer):
                             ref_hidden_states[i, step_boundary_list[i], :]
                             for i in range(len(step_boundary_list))
                         ]
-                        # print(f"ref_hidden_states len: {len(ref_hidden_states)}", flush=True) # batch size = 256
-                        # print(f"ref_hidden_states[0] shape: {ref_hidden_states[0].shape}", flush=True) # step 수: torch.Size([5, 2048])
-                        # print(f"ref_hidden_states[1] shape: {ref_hidden_states[1].shape}", flush=True) # step 수: torch.Size([4, 2048])
+                        print(f"ref_hidden_states len: {len(ref_hidden_states)}", flush=True) # batch size = 256
+                        print(f"ref_hidden_states[0] shape: {ref_hidden_states[0].shape}", flush=True) # step 수: torch.Size([5, 2048])
+                        print(f"ref_hidden_states[1] shape: {ref_hidden_states[1].shape}", flush=True) # step 수: torch.Size([4, 2048])
+
+                        # ref_hidden_states 원본 텐서 삭제
+                        del new_batch.batch["ref_hidden_states"]
 
                         # actor 모델로 각 step의 hidden state 구하기
                         actor_step_embs = self.get_actor_step_embs(new_batch, step_boundary_list)
-                        # print(f"actor_step_embs len: {len(actor_step_embs)}", flush=True) # batch size = 256
-                        # print(f"actor_step_embs[0] shape: {actor_step_embs[0].shape}", flush=True) # step 수: torch.Size([4, 2048])
-                        # print(f"actor_step_embs[1] shape: {actor_step_embs[1].shape}", flush=True) # step 수: torch.Size([3, 2048])
+                        print(f"actor_step_embs len: {len(actor_step_embs)}", flush=True) # batch size = 256
+                        print(f"actor_step_embs[0] shape: {actor_step_embs[0].shape}", flush=True) # step 수: torch.Size([4, 2048])
+                        print(f"actor_step_embs[1] shape: {actor_step_embs[1].shape}", flush=True) # step 수: torch.Size([3, 2048])
 
                         # ICM 모델로 intrinsic reward 계산하기
                         s_t_batch, a_t_batch, s_t1_batch, pair_map = self.icm.prepare_icm_input(ref_hidden_states, actor_step_embs)
@@ -548,21 +550,28 @@ class RayDAPOTrainer(RayPPOTrainer):
                         # print(f"s_t1_batch shape: {s_t1_batch.shape if s_t1_batch is not None else None}", flush=True) # torch.Size([num_steps, hidden_dim])
                         # print(f"pair_map: {pair_map[:10]} (showing first 10)", flush=True) # [(data_idx, step_idx), ...]
 
+                        del ref_hidden_states, actor_step_embs  # ICM 입력 준비 후 삭제
+
                         if s_t_batch is not None:
                             next_state, next_state_hat = self.icm(s_t_batch, s_t1_batch, a_t_batch)
                             # print(f"next_state shape: {next_state.shape}", flush=True) # torch.Size([num_steps, hidden_dim])
                             # print(f"next_state_hat shape: {next_state_hat.shape}", flush=True) # torch.Size([num_steps, hidden_dim])
+                            del s_t_batch, a_t_batch, s_t1_batch  # forward 후 삭제
 
                             icm_loss = self.icm.icm_loss(next_state, next_state_hat)
                             # print(f"icm_loss: {icm_loss.item()}", flush=True) # 5.6551690101623535
 
                             intrinsic_reward = self.intrinsic_reward(next_state, next_state_hat)
                             # print(f"intrinsic_reward shape: {intrinsic_reward.shape}", flush=True) # torch.Size([num_steps,])
+                            del next_state, next_state_hat  # intrinsic reward 계산 후 삭제
 
                             self.icm_optimizer.zero_grad()
                             icm_loss.backward()
+                            del icm_loss
                             self.icm_optimizer.step()
                             self.icm_lr_scheduler.step()
+
+                        torch.cuda.empty_cache()  # 삭제한 텐서들 실제로 해제
 
                     if self.config.algorithm.use_kl_in_reward:
                         # We need these metrics for apply_kl_penalty if using kl in reward
@@ -600,10 +609,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                             new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"]
 
                     # intrinsic reward을 token_level_rewards에 더하기
-                    print(f"before adding intrinsic reward: {new_batch.batch['token_level_rewards'][0][:10]} (showing first 10 tokens of first sample)", flush=True) # tensor([0., 0., 0., ...])
+                    print(f"before adding intrinsic reward: {new_batch.batch['token_level_rewards'][0]} (showing first sample)", flush=True) # tensor([0., 0., 0., ...])
                     if self.config.algorithm.use_icm:
                         new_batch = self.add_intrinsic_reward(new_batch, intrinsic_reward, pair_map, step_boundary_list)
-                    print(f"after adding intrinsic reward: {new_batch.batch['token_level_rewards'][0][:10]} (showing first 10 tokens of first sample)", flush=True) # tensor([ 0.5547, -0.7383, -0.7383, ...])
+                    print(f"after adding intrinsic reward: {new_batch.batch['token_level_rewards'][0]} (showing first sample)", flush=True) # tensor([ 0.5547, -0.7383, -0.7383, ...])
 
 
                     if not self.config.algorithm.filter_groups.enable:

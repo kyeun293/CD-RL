@@ -25,7 +25,7 @@ reward:
     max_resp_len: null
     # Step separator for parsing responses into reasoning steps.
     # Set to null to disable separator-based parsing.
-    step_sep: "\n\n"
+    step_sep: "Step"
     # Path to the Qwen2.5-7B-PRM-MATH-Instruct model for step-level reward scoring.
     # e.g. prm_model_path: Qwen/Qwen2.5-7B-PRM-MATH-Instruct
     # Set to null to disable PRM scoring.

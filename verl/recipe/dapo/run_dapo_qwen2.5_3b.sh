@@ -4,24 +4,45 @@ source /home/soo/miniconda3/etc/profile.d/conda.sh
 conda activate verl
 
 # GPU 설정 (GPU 2,3번 사용)
-GPU_ID=0,1
+GPU_ID=2,3
 export CUDA_VISIBLE_DEVICES=$GPU_ID
+export NCCL_IGNORE_DISABLED_P2P=1
+export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=0
 NNODES=1
 NGPUS_PER_NODE=2
 
 # current directory 이동
-basepath=/home/soo/yejin/verl
+basepath=/home/soo/yejin/CD-RL/verl
 cd $basepath
 export PYTHONPATH=$basepath:$PYTHONPATH
 
 # 기록
 project_name='DAPO'
 exp_name='DAPO-Qwen2.5-3B'
-LOG_OUTPUT=/home/soo/yejin/verl/my_scripts/logs
-exec > >(tee "${LOG_OUTPUT}/${exp_name}.log") 2>&1
+LOG_OUTPUT=/home/soo/yejin/CD-RL/verl/my_scripts/logs
 
 # 실행하는 명령 출력
 # set -euo pipefail
+
+# ─── 시작 전 이전 잔여 프로세스 정리 ────────────────────────────────────────
+echo "[cleanup] Killing any leftover Ray/DAPO processes..."
+pkill -9 -u $USER -f "main_dapo"   2>/dev/null || true
+pkill -9 -u $USER -f "ray::"       2>/dev/null || true
+pkill -9 -u $USER -f "ray/dashboard" 2>/dev/null || true
+sleep 1
+rm -rf /dev/shm/${USER}_ray_tmp
+echo "[cleanup] Done."
+ 
+# ─── 종료 시 자동 정리 (Ctrl+C / kill / 정상 종료 모두 처리) ─────────────────
+cleanup() {
+    echo "[cleanup] Caught exit signal. Cleaning up..."
+    pkill -9 -u $USER -f "main_dapo"   2>/dev/null || true
+    pkill -9 -u $USER -f "ray::"       2>/dev/null || true
+    pkill -9 -u $USER -f "ray/dashboard" 2>/dev/null || true
+    rm -rf /dev/shm/${USER}_ray_tmp
+    echo "[cleanup] Done."
+}
+trap cleanup EXIT INT TERM
 
 # 학습 설정
 adv_estimator=grpo # critic 함수 이용하지 X
@@ -30,7 +51,6 @@ use_kl_in_reward=False
 kl_coef=0.0
 use_kl_loss=False
 kl_loss_coef=0.0
-
 clip_ratio_low=0.2
 clip_ratio_high=0.28
 
@@ -39,7 +59,6 @@ max_response_length=$((1024 * 2)) # 4096에서 2048로 줄임 (속도 체감 대
 enable_overlong_buffer=True
 overlong_buffer_len=$((1024 * 1)) 
 overlong_penalty_factor=1.0
-
 loss_agg_mode="token-mean"
 
 enable_filter_groups=False
@@ -57,6 +76,7 @@ mkdir -p $RAY_TMPDIR
 export VERL_ZMQ_DIR=/dev/shm
 
 MODEL_PATH=${MODEL_PATH:-"${basepath}/models/Qwen2.5-3B"}
+PRM_MODEL_PATH=${PRM_MODEL_PATH:-"${basepath}/models/Qwen2.5-Math-PRM-7B"}
 CKPTS_DIR=${CKPTS_DIR:-"${basepath}/ckpts/${project_name}/${exp_name}"}
 TRAIN_FILE=${TRAIN_FILE:-"${basepath}/data/dapo-math-17k.parquet"}
 TEST_FILE=${TEST_FILE:-"${basepath}/data/aime-2024.parquet"}
@@ -155,6 +175,7 @@ python3 -m recipe.dapo.main_dapo \
     reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
     reward.reward_kwargs.overlong_buffer_cfg.log=False \
     reward.reward_kwargs.max_resp_len=${max_response_length} \
+    +reward.reward_kwargs.prm_model_path="${PRM_MODEL_PATH}" \
     trainer.logger='["console","wandb"]' \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
@@ -167,6 +188,5 @@ python3 -m recipe.dapo.main_dapo \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     +ray_kwargs.ray_init.include_dashboard=False \
-    +ray_kwargs.ray_init._temp_dir=/dev/shm/soo_ray_tmp
-
-rm -rf /dev/shm/soo_ray_tmp
+    +ray_kwargs.ray_init._temp_dir=/dev/shm/soo_ray_tmp \
+    2>&1 | tee "${LOG_OUTPUT}/${exp_name}.log"
