@@ -1,25 +1,33 @@
 #!/bin/bash
+#SBATCH --job-name=run_dapo_qwen2.5_3b
+#SBATCH --partition=a6000
+#SBATCH --nodelist=node03
+#SBATCH --gres=gpu:5
+#SBATCH --time=14-0:00:00
+#SBATCH --mem=250G
+#SBATCH --cpus-per-task=20
+#SBATCH --output=/home/yejin/data/projects/yejin/Curiosity/CD-RL/verl/my_scripts/logs/run_dapo_qwen2.5_3b.out
+
+set -x
+
 # conda 환경 활성화
-source /home/soo/miniconda3/etc/profile.d/conda.sh
+ml purge
+ml load cuda/12.1
+eval "$(conda shell.bash hook)"
 conda activate verl
 
-# GPU 설정 (GPU 2,3번 사용)
-GPU_ID=2,3
-export CUDA_VISIBLE_DEVICES=$GPU_ID
-export NCCL_IGNORE_DISABLED_P2P=1
-export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=0
+unset ROCR_VISIBLE_DEVICES
 NNODES=1
-NGPUS_PER_NODE=2
+NGPUS_PER_NODE=4
 
 # current directory 이동
-basepath=/home/soo/yejin/CD-RL/verl
+basepath=/home/yejin/data/projects/yejin/Curiosity/CD-RL/verl
 cd $basepath
 export PYTHONPATH=$basepath:$PYTHONPATH
 
 # 기록
 project_name='DAPO'
 exp_name='DAPO-Qwen2.5-3B'
-LOG_OUTPUT=/home/soo/yejin/CD-RL/verl/my_scripts/logs
 
 # 실행하는 명령 출력
 # set -euo pipefail
@@ -29,17 +37,22 @@ echo "[cleanup] Killing any leftover Ray/DAPO processes..."
 pkill -9 -u $USER -f "main_dapo"   2>/dev/null || true
 pkill -9 -u $USER -f "ray::"       2>/dev/null || true
 pkill -9 -u $USER -f "ray/dashboard" 2>/dev/null || true
-sleep 1
+ray stop --force 2>/dev/null || true
+sleep 2
 rm -rf /dev/shm/${USER}_ray_tmp
+rm -rf /tmp/ray
 echo "[cleanup] Done."
  
 # ─── 종료 시 자동 정리 (Ctrl+C / kill / 정상 종료 모두 처리) ─────────────────
 cleanup() {
     echo "[cleanup] Caught exit signal. Cleaning up..."
+    # 로그 먼저 백업
+    cp -r /dev/shm/${USER}_ray_tmp/session_latest/logs/ /tmp/ray_logs_backup/ 2>/dev/null || true
     pkill -9 -u $USER -f "main_dapo"   2>/dev/null || true
     pkill -9 -u $USER -f "ray::"       2>/dev/null || true
     pkill -9 -u $USER -f "ray/dashboard" 2>/dev/null || true
     rm -rf /dev/shm/${USER}_ray_tmp
+    rm -rf /tmp/ray
     echo "[cleanup] Done."
 }
 trap cleanup EXIT INT TERM
@@ -71,7 +84,7 @@ train_prompt_mini_bsz=4          # 2 -> 8 (학습 단계 속도 향상)
 
 # Paths
 # Ray
-export RAY_TMPDIR=/dev/shm/soo_ray_tmp
+export RAY_TMPDIR=/dev/shm/yejin_ray_tmp
 mkdir -p $RAY_TMPDIR
 export VERL_ZMQ_DIR=/dev/shm
 
@@ -105,7 +118,9 @@ icm_warmup_steps=10
 icm_intrinsic_reward_token="all_step_tokens" # "last_step_token" or "all_step_tokens"
 icm_eta=0.5
 
-python3 -m recipe.dapo.main_dapo \
+echo "main_dapo 시작..."
+
+PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -153,7 +168,7 @@ python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.60 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.50 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
@@ -188,5 +203,4 @@ python3 -m recipe.dapo.main_dapo \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     +ray_kwargs.ray_init.include_dashboard=False \
-    +ray_kwargs.ray_init._temp_dir=/dev/shm/soo_ray_tmp \
-    2>&1 | tee "${LOG_OUTPUT}/${exp_name}.log"
+    +ray_kwargs.ray_init._temp_dir=${RAY_TMPDIR} \

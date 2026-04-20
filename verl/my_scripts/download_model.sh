@@ -1,11 +1,13 @@
 #!/bin/bash
-# conda 환경 활성화
-source /home/soo/miniconda3/etc/profile.d/conda.sh
-conda activate verl
+#SBATCH --job-name=download_model2
+#SBATCH --partition=a6000
+#SBATCH --nodelist=node03
+#SBATCH --gres=gpu:0
+#SBATCH --time=14-0:00:00
+#SBATCH --mem=10G
+#SBATCH --cpus-per-task=8
+#SBATCH --output=/home/yejin/data/projects/yejin/Curiosity/CD-RL/my_scripts/logs/download_model.out
 
-# 기록
-LOG_OUTPUT=/home/soo/yejin/CD-RL/verl/my_scripts/logs
 
-huggingface-cli download Qwen/Qwen2.5-Math-PRM-7B \
-    --local-dir /home/soo/yejin/CD-RL/verl/models/Qwen2.5-Math-PRM-7B \
-    &> ${LOG_OUTPUT}/download_model.log
+huggingface-cli download Qwen/Qwen2.5-3B \
+    --local-dir /home/yejin/data/projects/yejin/Curiosity/CD-RL/verl/models/Qwen2.5-3B

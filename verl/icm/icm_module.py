@@ -54,17 +54,11 @@ class ICM(torch.nn.Module):
             a = actor_step_embs[i]    # (num_steps, hidden_dim)
             num_steps = a.shape[0]
 
-            if num_steps < 2:
-                continue
-
             for t in range(num_steps):
                 s_t_list.append(s[t])
                 a_t_list.append(a[t])
                 s_t1_list.append(s[t + 1])
                 pair_map.append((i, t))
-
-        if len(s_t_list) == 0:
-            return None, None, None, None
         
         # 배치로 묶기
         s_t_batch = torch.stack(s_t_list, dim=0)
