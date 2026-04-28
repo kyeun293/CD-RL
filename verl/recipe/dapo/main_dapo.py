@@ -109,7 +109,7 @@ class DAPOTaskRunner(TaskRunner):
 def main(config):
     auto_set_device(config)
     config = migrate_legacy_reward_impl(config)
-    run_ppo(config, task_runner_class=ray.remote(num_cpus=1)(DAPOTaskRunner))
+    run_ppo(config, task_runner_class=ray.remote(num_cpus=0)(DAPOTaskRunner))
 
 
 if __name__ == "__main__":

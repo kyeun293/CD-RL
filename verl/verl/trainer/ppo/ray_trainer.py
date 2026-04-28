@@ -710,6 +710,16 @@ class RayPPOTrainer:
 
         # create actor and rollout
         actor_role = Role.ActorRolloutRef if Role.ActorRolloutRef in self.role_worker_mapping else Role.ActorRollout
+        use_curiosity = self.config.algorithm.get("use_curiosity", False)
+        if use_curiosity:
+            OmegaConf.set_struct(self.config.actor_rollout_ref, False)
+            self.config.actor_rollout_ref.use_curiosity = use_curiosity
+            self.config.actor_rollout_ref.trainer = self.config.trainer
+            total_training_steps = self.config.trainer.total_epochs * len(self.train_dataloader)
+            self.config.actor_rollout_ref.total_training_steps = total_training_steps
+            self.config.actor_rollout_ref.trust_remote_code = self.config.data.get("trust_remote_code", False)
+            self.config.actor_rollout_ref.ref_in_actor = self.ref_in_actor
+            OmegaConf.set_struct(self.config.actor_rollout_ref, False)
         if self.hybrid_engine:
             actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
             actor_rollout_cls = RayClassWithInitArgs(
@@ -1174,13 +1184,6 @@ class RayPPOTrainer:
             log_probs = no_padding_2_padding(log_probs, batch_td)
             # step 5: rebuild a tensordict and convert to dataproto
             tensordict_data = {"ref_log_prob": log_probs.float()}
-
-            # hidden states가 있으면 반환
-            if batch.meta_info['output_hidden_states']:
-                hidden_states = tu.get(output, "hidden_states", default=None)
-                hidden_states = no_padding_2_padding(hidden_states, batch_td, is_hidden_states=True)
-                tensordict_data["ref_hidden_states"] = hidden_states
-
             ref_log_prob = tu.get_tensordict(tensordict_data)
             ref_log_prob = DataProto.from_tensordict(ref_log_prob)
         else:
@@ -1219,21 +1222,6 @@ class RayPPOTrainer:
             old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
             old_log_prob_mfu = 0
         return old_log_prob, old_log_prob_mfu
-
-    def _compute_actor_hidden_states(self, batch: DataProto) -> torch.Tensor:
-        """
-        actor로 hidden states만 추출. log_prob/entropy 계산 없음.
-        """
-        batch_td = batch.to_tensordict()
-        batch_td = left_right_2_no_padding(batch_td)
-        tu.assign_non_tensor(batch_td, calculate_entropy=False, compute_loss=False, output_hidden_states=True)
-        
-        output = self.actor_rollout_wg.compute_log_prob(batch_td)
-        
-        hidden_states = tu.get(output, "hidden_states", default=None)
-        assert hidden_states is not None, "output_hidden_states=True 설정 필요"
-        
-        return hidden_states  # (batch_size, seq_len, hidden_dim)
 
     def _update_actor(self, batch: DataProto) -> DataProto:
         rollout_config = self.config.actor_rollout_ref.rollout

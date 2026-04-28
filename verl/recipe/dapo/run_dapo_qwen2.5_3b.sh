@@ -1,33 +1,25 @@
 #!/bin/bash
-#SBATCH --job-name=run_dapo_qwen2.5_3b
-#SBATCH --partition=a6000
-#SBATCH --nodelist=node03
-#SBATCH --gres=gpu:5
-#SBATCH --time=14-0:00:00
-#SBATCH --mem=250G
-#SBATCH --cpus-per-task=20
-#SBATCH --output=/home/yejin/data/projects/yejin/Curiosity/CD-RL/verl/my_scripts/logs/run_dapo_qwen2.5_3b.out
+# conda 환경 활성화
+source /home/soo/miniconda3/etc/profile.d/conda.sh
+conda activate verl
+
+# GPU 설정
+GPU_ID=2,3,4,5
+export CUDA_VISIBLE_DEVICES=$GPU_ID
+NNODES=1
+NGPUS_PER_NODE=4 # 학습용 gpu 수
 
 set -x
 
-# conda 환경 활성화
-ml purge
-ml load cuda/12.1
-eval "$(conda shell.bash hook)"
-conda activate verl
-
-unset ROCR_VISIBLE_DEVICES
-NNODES=1
-NGPUS_PER_NODE=4
-
 # current directory 이동
-basepath=/home/yejin/data/projects/yejin/Curiosity/CD-RL/verl
+basepath=/home/soo/yejin/CD-RL/verl
 cd $basepath
 export PYTHONPATH=$basepath:$PYTHONPATH
 
 # 기록
 project_name='DAPO'
 exp_name='DAPO-Qwen2.5-3B'
+LOG_OUTPUT=/home/soo/yejin/CD-RL/verl/my_scripts/logs
 
 # 실행하는 명령 출력
 # set -euo pipefail
@@ -77,10 +69,10 @@ loss_agg_mode="token-mean"
 enable_filter_groups=False
 filter_groups_metric=acc
 max_num_gen_batches=1            # 8 -> 1 (생성 오버헤드 감소)
-train_prompt_bsz=32              # 8 -> 64 (전체 학습 효율 8배 향상)
-gen_prompt_bsz=$((train_prompt_bsz * 2))
+train_prompt_bsz=32              # 8 -> 32 (전체 학습 효율 4배 향상)
+gen_prompt_bsz=${train_prompt_bsz}
 n_resp_per_prompt=4 
-train_prompt_mini_bsz=4          # 2 -> 8 (학습 단계 속도 향상)
+train_prompt_mini_bsz=8          # 2 -> 8 (학습 단계 속도 향상)
 
 # Paths
 # Ray
@@ -101,16 +93,16 @@ top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
 val_top_p=0.7
 
 # Performance Related Parameter
-sp_size=1 # GPU 2대, sp는 노드 내 GPU 수 약수여야 함
-gen_tp=$NGPUS_PER_NODE
+sp_size=1 # GPU 4대, sp는 노드 내 GPU 수 약수여야 함
+gen_tp=2
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$((max_prompt_length + max_response_length))
 infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
 offload=False
 
 # 추가한 인자
-use_icm=True
-step_emb_chunk_size=32
+use_curiosity=True
+STEP_SEP="Step"
 icm_intermediate_size=8192
 icm_lr=1e-4
 icm_lr_scheduler_type="linear"
@@ -133,19 +125,20 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    algorithm.use_icm=${use_icm} \
-    +icm.step_emb_chunk_size=${step_emb_chunk_size} \
-    +icm.icm_intermediate_size=${icm_intermediate_size} \
-    +icm.lr=${icm_lr} \
-    +icm.lr_scheduler_type=${icm_lr_scheduler_type} \
-    +icm.warmup_steps=${icm_warmup_steps} \
-    +icm.intrinsic_reward_token=${icm_intrinsic_reward_token} \
-    +icm.eta=${icm_eta} \
+    algorithm.use_curiosity=${use_curiosity} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
     actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high} \
     actor_rollout_ref.actor.clip_ratio_c=10.0 \
+    actor_rollout_ref.step_sep=${STEP_SEP} \
+    actor_rollout_ref.prm_model_path="${PRM_MODEL_PATH}" \
+    actor_rollout_ref.icm.icm_intermediate_size=${icm_intermediate_size} \
+    actor_rollout_ref.icm.lr=${icm_lr} \
+    actor_rollout_ref.icm.lr_scheduler_type=${icm_lr_scheduler_type} \
+    actor_rollout_ref.icm.warmup_steps=${icm_warmup_steps} \
+    actor_rollout_ref.icm.intrinsic_reward_token=${icm_intrinsic_reward_token} \
+    actor_rollout_ref.icm.eta=${icm_eta} \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
     algorithm.filter_groups.metric=${filter_groups_metric} \
@@ -168,7 +161,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.50 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.70 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
@@ -190,7 +183,6 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
     reward.reward_kwargs.overlong_buffer_cfg.log=False \
     reward.reward_kwargs.max_resp_len=${max_response_length} \
-    +reward.reward_kwargs.prm_model_path="${PRM_MODEL_PATH}" \
     trainer.logger='["console","wandb"]' \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
@@ -204,3 +196,4 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     trainer.resume_mode=auto \
     +ray_kwargs.ray_init.include_dashboard=False \
     +ray_kwargs.ray_init._temp_dir=${RAY_TMPDIR} \
+    2>&1 | tee "${LOG_OUTPUT}/${exp_name}.log"
