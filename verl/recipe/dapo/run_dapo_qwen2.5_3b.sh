@@ -71,7 +71,7 @@ filter_groups_metric=acc
 max_num_gen_batches=1            # 8 -> 1 (생성 오버헤드 감소)
 train_prompt_bsz=32              # 8 -> 32 (전체 학습 효율 4배 향상)
 gen_prompt_bsz=${train_prompt_bsz}
-n_resp_per_prompt=4 
+n_resp_per_prompt=4
 train_prompt_mini_bsz=8          # 2 -> 8 (학습 단계 속도 향상)
 
 # Paths
@@ -161,7 +161,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.70 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \

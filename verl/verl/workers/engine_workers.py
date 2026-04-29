@@ -479,6 +479,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.config.actor.strategy == "megatron" and self.config.actor.megatron.router_replay.mode != "disabled"
         )
 
+        self.timing_raw = defaultdict(float)
+
         DistProfilerExtension.__init__(
             self, DistProfiler(rank=self.rank, config=profiler_config, tool_config=tool_config)
         )
@@ -834,24 +836,27 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if step_sep:
                 # Find step boundaries at token level so PRM (text) and ICM (ids) share
                 # the exact same step indices.
-                boundaries = self._find_sep_positions(valid_response_ids, step_sep=step_sep) # step separator가 있는 토큰의 인덱스: [60, 209, 314, 394, 453, 519, 645, 672]
+                with marked_timer("find_sep_positions", self.timing_raw):
+                    boundaries = self._find_sep_positions(valid_response_ids, step_sep=step_sep) # step separator가 있는 토큰의 인덱스: [60, 209, 314, 394, 453, 519, 645, 672]
 
-                if not boundaries or len(boundaries) < 2:
-                    step_texts = [self.tokenizer.decode(valid_response_ids, skip_special_tokens=True).strip()]
-                    boundaries = [0, valid_len]
-                    all_steps.append(step_texts)
-                    all_boundaries.append(boundaries)
-                    continue
+                if not boundaries:
+                    with marked_timer("decode_full_response", self.timing_raw):
+                        step_texts = [self.tokenizer.decode(valid_response_ids, skip_special_tokens=True).strip()]
+                        boundaries = [0, valid_len]
+                        all_steps.append(step_texts)
+                        all_boundaries.append(boundaries)
+                        continue
 
                 if boundaries[-1] != valid_len:
                     boundaries.append(valid_len)
 
                 # 각 step 텍스트 추출
-                step_texts = []
-                for k in range(len(boundaries) - 1):
-                    seg = valid_response_ids[boundaries[k]:boundaries[k+1]]
-                    text = self.tokenizer.decode(seg, skip_special_tokens=True).strip()
-                    step_texts.append(text)
+                with marked_timer("decode_step_texts", self.timing_raw):
+                    step_texts = []
+                    for k in range(len(boundaries) - 1):
+                        seg = valid_response_ids[boundaries[k]:boundaries[k+1]]
+                        text = self.tokenizer.decode(seg, skip_special_tokens=True).strip()
+                        step_texts.append(text)
                 
                 # if i == 0:
                 #     # print(f"[PARSE-DEBUG] boundaries: {boundaries}", flush=True) # [0, 27, 51, 71, 93, 117]
@@ -906,6 +911,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         
         output = self.ref.infer_batch(batch_td)
 
+        log_probs = tu.get(output, "log_probs", default=None)
+        log_probs = no_padding_2_padding(log_probs, batch_td)
+        batch.batch["ref_log_prob"] = log_probs.float()
+
         ref_hidden_states_raw = tu.get(output, "hidden_states", default=None)
         ref_hidden_states_raw = no_padding_2_padding(ref_hidden_states_raw, batch_td, is_hidden_states=True)
         batch.meta_info["output_hidden_states"] = False
@@ -922,8 +931,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         batch.non_tensor_batch["ref_hidden_states"] = ref_hidden_states
 
         del output
-        del ref_hidden_states_raw
-        del ref_hidden_states
+        del ref_hidden_states_raw, ref_hidden_states
+        del log_probs
         torch.cuda.empty_cache()
         
         return batch
@@ -1084,51 +1093,68 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # offset 계산
         global_indices = batch.non_tensor_batch["global_indices"]
         data_idx_offset = int(global_indices[0])
+        batch_size = len(batch)
 
         # 1. parse steps from response using step separator
         step_sep = batch.meta_info.get("step_sep", None)
-        batch = self._attach_parsed_steps(batch, step_sep=step_sep)
-        batch = self._score_prm(batch)
+        with marked_timer("parse", self.timing_raw):
+            batch = self._attach_parsed_steps(batch, step_sep=step_sep)
+        with marked_timer("prm_score", self.timing_raw):
+            batch = self._score_prm(batch)
         # print(f"[PRM-DEBUG] prm_labels len: {len(batch.non_tensor_batch['prm_labels'])}", flush=True) # batch size = 32개 데이터
         # [list([1, 1, 1, 1, 0]) list([1, 1, 1, 1, 1, 0]) list([1, 1, 1, 1, 0, 0]) list([1, 0, 0]) list([1, 1, 0, 0, 0, 0, 0, 0, 0, 0])]
 
         step_boundaries = batch.non_tensor_batch["step_boundaries"]
         # print(f"[ICM-DEBUG] step_boundaries len: {len(step_boundaries)}", flush=True) # batch size = 32개 데이터
+        # print(f"[ICM-DEBUG] first step_boundaries: {step_boundaries[0]} (showing first sample)", flush=True)
         # [[0, 27, 51, 71, 93, 117], [0, 23, 62, 121, 164, 193, 222], [73, 161, 259, 586, 704, 734, 963], [0, 123, 201, 248], [0, 41, 73, 101, 163, 199, 236, 260, 301, 329, 490]] (batch size 32)
 
         # 2. compute ICM loss
         # print(f"[ICM-DEBUG] Computing reference hidden states", flush=True)
-        batch = self._get_ref_hidden_states(batch)
+        with marked_timer("ref_hidden_states", self.timing_raw):
+            batch = self._get_ref_hidden_states(batch)
         # print(f"ref_hidden_states len: {len(ref_hidden_states)}", flush=True) # batch size = 32개 데이터
         # print(f"ref_hidden_states[0] shape: {ref_hidden_states[0].shape}", flush=True) # step 수+1: torch.Size([6, 2048])
         # print(f"ref_hidden_states[1] shape: {ref_hidden_states[1].shape}", flush=True) # step 수+1: torch.Size([7, 2048])
         
         # print(f"[ICM-DEBUG] Computing actor hidden states", flush=True)
         
-        batch = self._get_actor_hidden_states(batch, step_boundaries)
+        with marked_timer("actor_hidden_states", self.timing_raw):
+            batch = self._get_actor_hidden_states(batch, step_boundaries)
         # print(f"actor_hidden_states len: {len(actor_hidden_states)}", flush=True) # batch size = 32개 데이터
         # print(f"actor_hidden_states[0] shape: {actor_hidden_states[0].shape}", flush=True) # step 수: torch.Size([5, 2048])
         # print(f"actor_hidden_states[1] shape: {actor_hidden_states[1].shape}", flush=True) # step 수: torch.Size([6, 2048])
 
         # print(f"[ICM-DEBUG] Computing ICM intrinsic rewards", flush=True)
-        intrinsic_reward, pair_map, icm_loss_val = self._compute_icm(batch.non_tensor_batch["ref_hidden_states"], batch.non_tensor_batch["actor_hidden_states"])
+        with marked_timer("icm_compute", self.timing_raw):
+            intrinsic_reward, pair_map, icm_loss_val = self._compute_icm(batch.non_tensor_batch["ref_hidden_states"], batch.non_tensor_batch["actor_hidden_states"])
         # print(f"[ICM-DEBUG] icm_loss: {icm_loss_val}", flush=True) # 8.375
         # print(f"[ICM-DEBUG] intrinsic_reward shape:{intrinsic_reward.shape}", flush=True) # torch.Size([1327]) 총 step 수
         # print(f"[ICM-DEBUG] intrinsic_reward sample: {intrinsic_reward[:10]} (showing first 5 samples)", flush=True) # tensor([ 0.6016,  0.1338,  0.4023,  1.0000,  2.0000, -0.3340, -0.7344, -0.4023, -0.3340,  0.2676], dtype=torch.bfloat16)
         # print(f"[ICM-DEBUG] pair_map len: {len(pair_map)}", flush=True) # 1327 총 step 수
         # print(f"[ICM-DEBUG] pair_map sample: {pair_map[:10]} (showing first 5 samples)", flush=True) # [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4)]
 
-        # add offset to pair_map
+        # reorganize intrinsic_reward and pair map to align with batch samples
         pair_map = [(idx + data_idx_offset, step_idx) for idx, step_idx in pair_map]
+        intrinsic_reward_per_sample, pair_map_per_sample = [], []
+        for boundary in step_boundaries:
+            n_steps = len(boundary) - 1
+            intrinsic_reward_per_sample.append(intrinsic_reward[:n_steps].cpu().float().numpy())
+            pair_map_per_sample.append(pair_map[:n_steps])
+            intrinsic_reward = intrinsic_reward[n_steps:]
+            pair_map = pair_map[n_steps:]
 
         result = DataProto(
-            batch=None,
+            batch=TensorDict(
+                {"ref_log_prob": batch.batch["ref_log_prob"]},
+                batch_size=batch_size,
+            ),
             non_tensor_batch={
-                "intrinsic_reward": intrinsic_reward.cpu().float().numpy(),
+                "intrinsic_reward": np.array(intrinsic_reward_per_sample, dtype=object),
                 "prm_labels": batch.non_tensor_batch["prm_labels"],
-                "pair_map": np.array(pair_map, dtype=object),
+                "pair_map": np.array(pair_map_per_sample, dtype=object),
                 "step_boundaries": step_boundaries,
-                "icm_loss": np.array([icm_loss_val]),
+                "icm_loss": np.array([icm_loss_val] * batch_size, dtype=np.float32),
             }
         )
 
@@ -1137,5 +1163,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         del pair_map
         del icm_loss_val
         torch.cuda.empty_cache()
+
+        for key, value in self.timing_raw.items():
+            logger.info(f"Curiosity timing - {key}: {value:.2f} seconds")
 
         return result

@@ -81,12 +81,11 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         if self.use_reference_policy:
             # compute reference log_prob
-            with marked_timer("ref", timing_raw, "olive"):
-                if "ref_log_prob" not in batch.batch:
-                    ref_log_prob = self._compute_ref_log_prob(batch)
-                    batch = batch.union(ref_log_prob)
-                else:
-                    print("ref_log_prob already in batch, skipping computation", flush=True)
+            if "ref_log_prob" not in batch.batch:
+                ref_log_prob = self._compute_ref_log_prob(batch)
+                batch = batch.union(ref_log_prob)
+            else:
+                print("ref_log_prob already in batch, skipping computation", flush=True)
 
         return batch
     
@@ -101,24 +100,26 @@ class RayDAPOTrainer(RayPPOTrainer):
         intrinsic_reward = curiosity_result.non_tensor_batch["intrinsic_reward"]
         pair_map = curiosity_result.non_tensor_batch["pair_map"]
         step_boundary_list = curiosity_result.non_tensor_batch["step_boundaries"]
+        intrinsic_reward_flat = [reward for rewards in intrinsic_reward for reward in rewards]
+        pair_map_flat = [pair for pairs in pair_map for pair in pairs]
 
-        prm_total = sum(len(prm_labels[i]) for i in range(len(prm_labels)))
-        step_total = sum(len(step_boundary_list[i]) - 1 for i in range(len(step_boundary_list)))
+        # prm_total = sum(len(prm_labels[i]) for i in range(len(prm_labels)))
+        # step_total = sum(len(step_boundary_list[i]) - 1 for i in range(len(step_boundary_list)))
         # print(f"pair_map is sorted: {all(pair_map[i][0] <= pair_map[i+1][0] for i in range(len(pair_map)-1))}", flush=True)
         # print(f"pair_map sample: {pair_map[:10]}", flush=True)
-        # print(f"pair_map len: {len(pair_map)}, intrinsic_reward len: {len(intrinsic_reward)}, prm_labels len: {prm_total}, step_boundaries len: {step_total}", flush=True)
+        # print(f"pair_map len: {len(pair_map_flat)}, intrinsic_reward len: {len(intrinsic_reward_flat)}, prm_labels len: {prm_total}, step_boundaries len: {step_total}", flush=True)
         # pair_map len: 1557, intrinsic_reward len: 1557, prm_labels len: 1557, step_boundaries len: 1557
 
-        for k, (data_idx, step_idx) in enumerate(pair_map):
+        for k, (data_idx, step_idx) in enumerate(pair_map_flat):
             boundary = step_boundary_list[data_idx]
             start = boundary[step_idx]
             end = boundary[step_idx + 1]
             prm_label = prm_labels[data_idx][step_idx]
 
             if self.config.actor_rollout_ref.icm.intrinsic_reward_token == "all_step_tokens":
-                batch.batch["token_level_rewards"][data_idx, start:end] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward[k].item() * prm_label
+                batch.batch["token_level_rewards"][data_idx, start:end] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward_flat[k].item() * prm_label
             elif self.config.actor_rollout_ref.icm.intrinsic_reward_token == "last_step_token":
-                batch.batch["token_level_rewards"][data_idx, end - 1] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward[k].item() * prm_label
+                batch.batch["token_level_rewards"][data_idx, end - 1] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward_flat[k].item() * prm_label
 
         return batch
 
@@ -252,8 +253,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                             new_batch.meta_info["step_sep"] = self._step_sep
                             new_batch.non_tensor_batch["global_indices"] = np.arange(batch_size)
                             curiosity_result = self.actor_rollout_wg.compute_curiosity(new_batch)  
-                        # for k, v in curiosity_result.non_tensor_batch.items():
-                        #     print(f"  {k}: type={type(v)}, shape={getattr(v, 'shape', 'N/A')}", flush=True)
+
+                        new_batch.batch["ref_log_prob"] = curiosity_result.batch["ref_log_prob"]
+                        metrics["train/icm_loss"] = curiosity_result.non_tensor_batch["icm_loss"].mean().item()
 
 
                     if self.config.algorithm.use_kl_in_reward:
@@ -380,8 +382,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
                     if not self.config.algorithm.use_kl_in_reward:
-                        with marked_timer("ref_kl", timing_raw, "olive"):
-                            batch = self.compute_kl_related_metrics(batch, metrics, timing_raw)
+                        batch = self.compute_kl_related_metrics(batch, metrics, timing_raw)
 
                     # compute values
                     if self.use_critic:
