@@ -10,6 +10,7 @@ NNODES=1
 NGPUS_PER_NODE=4 # 학습용 gpu 수
 
 set -x
+export NCCL_DEBUG=INFO
 
 # current directory 이동
 basepath=/home/soo/yejin/CD-RL/verl
@@ -20,9 +21,6 @@ export PYTHONPATH=$basepath:$PYTHONPATH
 project_name='DAPO'
 exp_name='DAPO-Qwen2.5-3B'
 LOG_OUTPUT=/home/soo/yejin/CD-RL/verl/my_scripts/logs
-
-# 실행하는 명령 출력
-# set -euo pipefail
 
 # ─── 시작 전 이전 잔여 프로세스 정리 ────────────────────────────────────────
 echo "[cleanup] Killing any leftover Ray/DAPO processes..."
@@ -58,21 +56,20 @@ use_kl_loss=False
 kl_loss_coef=0.0
 clip_ratio_low=0.2
 clip_ratio_high=0.28
-
 max_prompt_length=$((1024 * 2))
-max_response_length=$((1024 * 2)) # 4096에서 2048로 줄임 (속도 체감 대박)
+max_response_length=$((1024 * 4)) # 4096에서 2048로 줄임 (속도 체감 대박)
 enable_overlong_buffer=True
-overlong_buffer_len=$((1024 * 1)) 
+overlong_buffer_len=$((256)) 
 overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
-
-enable_filter_groups=False
+enable_filter_groups=True
 filter_groups_metric=acc
-max_num_gen_batches=1            # 8 -> 1 (생성 오버헤드 감소)
-train_prompt_bsz=32              # 8 -> 32 (전체 학습 효율 4배 향상)
-gen_prompt_bsz=${train_prompt_bsz}
-n_resp_per_prompt=4
-train_prompt_mini_bsz=8          # 2 -> 8 (학습 단계 속도 향상)
+max_num_gen_batches=0            # 8 -> 1 (생성 오버헤드 감소)
+
+train_prompt_bsz=64              # 8 -> 32 (전체 학습 효율 4배 향상)
+gen_prompt_bsz=$((train_prompt_bsz * 2))
+n_resp_per_prompt=6
+train_prompt_mini_bsz=16          # 2 -> 8 (학습 단계 속도 향상)
 
 # Paths
 # Ray
@@ -93,11 +90,13 @@ top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
 val_top_p=0.7
 
 # Performance Related Parameter
-sp_size=1 # GPU 4대, sp는 노드 내 GPU 수 약수여야 함
+sp_size=1 # curiosity 계산에서 sequence parallel 구현하지 않음 -> sp_size=1로 고정
 gen_tp=2
 use_dynamic_bsz=True
-actor_ppo_max_token_len=$((max_prompt_length + max_response_length))
-infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
+actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * n_resp_per_prompt))
+# (2048 + 4096) * 6 = 36864
+infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
+# (2048 + 4096) * 2 = 12288
 offload=False
 
 # 추가한 인자
@@ -108,7 +107,7 @@ icm_lr=1e-4
 icm_lr_scheduler_type="linear"
 icm_warmup_steps=10
 icm_intrinsic_reward_token="all_step_tokens" # "last_step_token" or "all_step_tokens"
-icm_eta=0.5
+icm_eta=0.04
 
 echo "main_dapo 시작..."
 
@@ -142,6 +141,8 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
     algorithm.filter_groups.metric=${filter_groups_metric} \
+    actor_rollout_ref.actor.use_torch_compile=False \
+    actor_rollout_ref.ref.use_torch_compile=False \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.ref.log_prob_use_dynamic_bsz=${use_dynamic_bsz} \
@@ -150,6 +151,9 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
+    +actor_rollout_ref.model.override_config.attention_dropout=0. \
+    +actor_rollout_ref.model.override_config.embd_pdrop=0. \
+    +actor_rollout_ref.model.override_config.resid_pdrop=0. \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
@@ -161,10 +165,10 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
+    actor_rollout_ref.rollout.max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 2)) \
     actor_rollout_ref.rollout.temperature=${temperature} \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k="${top_k}" \
@@ -189,11 +193,17 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     trainer.n_gpus_per_node=${NGPUS_PER_NODE} \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=True \
-    trainer.test_freq=50 \
-    trainer.save_freq=50 \
+    trainer.test_freq=40 \
+    trainer.save_freq=40 \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
+    actor_rollout_ref.actor.entropy_checkpointing=True \
+    actor_rollout_ref.ref.entropy_checkpointing=True \
+    actor_rollout_ref.actor.fsdp_config.forward_prefetch=True \
+    actor_rollout_ref.ref.fsdp_config.forward_prefetch=True \
+    actor_rollout_ref.actor.entropy_from_logits_with_chunking=True \
+    actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
     +ray_kwargs.ray_init.include_dashboard=False \
     +ray_kwargs.ray_init._temp_dir=${RAY_TMPDIR} \
     2>&1 | tee "${LOG_OUTPUT}/${exp_name}.log"

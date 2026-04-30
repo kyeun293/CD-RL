@@ -1143,6 +1143,17 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 # rmpad 모드면 nested tensor로 변환
                 cu_seqlens = input_ids.offsets()
                 last_hidden = last_hidden.squeeze(0)  # [total_nnz, hidden_dim]
+                
+                # SP gather 추가
+                if self.use_ulysses_sp:
+                    pad_size = output_args["pad_size"]
+                    last_hidden = gather_outputs_and_unpad(
+                        last_hidden,
+                        gather_dim=0,
+                        unpad_dim=0,
+                        padding_size=pad_size,
+                    )
+                
                 last_hidden = torch.nested.nested_tensor_from_jagged(last_hidden, cu_seqlens)
             else:
                 # 제대로 구현 X

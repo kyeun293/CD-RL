@@ -245,19 +245,6 @@ class RayDAPOTrainer(RayPPOTrainer):
                     new_batch = new_batch.repeat(repeat_times=self.config.actor_rollout_ref.rollout.n, interleave=True)
                     new_batch = new_batch.union(gen_batch_output)
 
-                    # calculate curiosity score if needed
-                    if self._use_curiosity:
-                        with marked_timer("curiosity", timing_raw, "magenta"):
-                            print(f"[CURIO-DEBUG] Computing curiosity scores", flush=True)
-                            batch_size =len(new_batch.batch)
-                            new_batch.meta_info["step_sep"] = self._step_sep
-                            new_batch.non_tensor_batch["global_indices"] = np.arange(batch_size)
-                            curiosity_result = self.actor_rollout_wg.compute_curiosity(new_batch)  
-
-                        new_batch.batch["ref_log_prob"] = curiosity_result.batch["ref_log_prob"]
-                        metrics["train/icm_loss"] = curiosity_result.non_tensor_batch["icm_loss"].mean().item()
-
-
                     if self.config.algorithm.use_kl_in_reward:
                         # We need these metrics for apply_kl_penalty if using kl in reward
                         new_batch = self.compute_kl_related_metrics(new_batch, metrics, timing_raw)
@@ -292,18 +279,6 @@ class RayDAPOTrainer(RayPPOTrainer):
                             )  # TODO: This will be cleared if we use multiple genenration batches
                         else:
                             new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"]
-
-                    # intrinsic reward을 token_level_rewards에 더하기
-                    # check_tensor = new_batch.batch["token_level_rewards"][0]
-                    # nonzero_indices = check_tensor.nonzero(as_tuple=True)[0]
-                    # print(f"[ICM-DEBUG] nonzero positions: {nonzero_indices.tolist()}")
-                    # print(f"[ICM-DEBUG] nonzero values: {check_tensor[nonzero_indices].tolist()}")
-                    if self._use_curiosity:
-                        new_batch = self.add_intrinsic_reward(new_batch, curiosity_result)
-                    # nonzero_indices = new_batch.batch["token_level_rewards"][0].nonzero(as_tuple=True)[0]
-                    # print(f"[ICM-DEBUG] nonzero positions: {nonzero_indices.tolist()}")
-                    # print(f"[ICM-DEBUG] nonzero values: {new_batch.batch['token_level_rewards'][0][nonzero_indices].tolist()}")
-
 
                     if not self.config.algorithm.filter_groups.enable:
                         batch = new_batch
@@ -368,6 +343,28 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                     # print(f"batch: {batch}", flush=True)
                     self.checkpoint_manager.sleep_replicas()
+
+                    # calculate curiosity score if needed
+                    if self._use_curiosity:
+                        with marked_timer("curiosity", timing_raw, "magenta"):
+                            print(f"[CURIO-DEBUG] Computing curiosity scores", flush=True)
+                            batch_size =len(batch.batch)
+                            batch.meta_info["step_sep"] = self._step_sep
+                            batch.non_tensor_batch["global_indices"] = np.arange(batch_size)
+                            curiosity_result = self.actor_rollout_wg.compute_curiosity(batch)  
+
+                        batch.batch["ref_log_prob"] = curiosity_result.batch["ref_log_prob"]
+                        metrics["train/icm_loss"] = curiosity_result.non_tensor_batch["icm_loss"].mean().item()
+
+                        # intrinsic reward을 token_level_rewards에 더하기
+                        # check_tensor = batch.batch["token_level_rewards"][0]
+                        # nonzero_indices = check_tensor.nonzero(as_tuple=True)[0]
+                        # print(f"[ICM-DEBUG] nonzero positions: {nonzero_indices.tolist()}")
+                        # print(f"[ICM-DEBUG] nonzero values: {check_tensor[nonzero_indices].tolist()}")
+                        batch = self.add_intrinsic_reward(batch, curiosity_result)
+                        # nonzero_indices = batch.batch["token_level_rewards"][0].nonzero(as_tuple=True)[0]
+                        # print(f"[ICM-DEBUG] nonzero positions: {nonzero_indices.tolist()}")
+                        # print(f"[ICM-DEBUG] nonzero values: {batch.batch['token_level_rewards'][0][nonzero_indices].tolist()}")
 
                     # === Updating ===
                     # Balance the number of valid tokens across DP ranks.
