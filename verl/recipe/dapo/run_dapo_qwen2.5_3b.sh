@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
-export CUDA_VISIBLE_DEVICES=0
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export RAY_TMPDIR="/home/yeeun/ray_tmp"
+export RAY_TMPDIR="/home/yeeun/ray_cd"
+export CUDA_VISIBLE_DEVICES=2,3,4,5
+export NCCL_SOCKET_NTHREADS=2
+export NCCL_NSOCKS_PERTHREAD=8
+export CUDA_DEVICE_MAX_CONNECTIONS=1
 
 project_name='DAPO-Qwen2.5-3B-Instruct'
-exp_name='DAPO-Qwen2.5-3B-Instruct'
+exp_name='DAPO-Qwen2.5-3B-Instruct-no-prm-1024-subset'
 
 adv_estimator=grpo
 
@@ -18,19 +21,19 @@ clip_ratio_high=0.28
 max_prompt_length=$((1024 * 2))
 max_response_length=$((1024 * 2))
 enable_overlong_buffer=True
-overlong_buffer_len=$((1024 * 1))
+overlong_buffer_len=$((256))
 overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
-enable_filter_groups=False
+enable_filter_groups=True
 filter_groups_metric=acc
-max_num_gen_batches=1
+max_num_gen_batches=0
 
 NNODES=1
 
-train_prompt_bsz=128  #512
+train_prompt_bsz=64
 gen_prompt_bsz=$((train_prompt_bsz * 2))
-n_resp_per_prompt=4
-train_prompt_mini_bsz=32   #128
+n_resp_per_prompt=6
+train_prompt_mini_bsz=16
 
 # Ray
 PWD=./
@@ -41,9 +44,8 @@ RUNTIME_ENV=${RUNTIME_ENV:-"/home/yeeun/CD-RL/verl/recipe/dapo/runtime_env.yaml"
 # Paths
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2.5-3B-Instruct"}
-PRM_MODEL_PATH=${PRM_MODEL_PATH:-"Qwen/Qwen2.5-Math-PRM-7B"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/dapo-math-17k.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/dapo-1.7k.parquet"}
 TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/aime-2024.parquet"}
 
 # Algorithm
@@ -52,12 +54,12 @@ top_p=1.0
 top_k=-1  # 0 for HF rollout, -1 for vLLM rollout
 
 # Performance Related Parameter
-sp_size=1
+sp_size=4
 use_dynamic_bsz=True
-actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
-infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
-offload=True
-gen_tp=1
+actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
+infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
+offload=False
+gen_tp=2
 
 ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
@@ -108,10 +110,10 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.80 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
+    actor_rollout_ref.rollout.max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 2)) \
     actor_rollout_ref.rollout.temperature=${temperature} \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k="${top_k}" \
@@ -129,18 +131,17 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
     reward.reward_kwargs.overlong_buffer_cfg.log=False \
     reward.reward_kwargs.max_resp_len=${max_response_length} \
-    reward.reward_kwargs.prm_model_path="${PRM_MODEL_PATH}" \
-    trainer.logger="['console']" \
+    trainer.logger="['console','wandb']" \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.n_gpus_per_node=${sp_size} \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
-    trainer.save_freq=20 \
+    trainer.save_freq=40 \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
-    trainer.resume_mode=auto \
+    trainer.resume_mode=resume \
     actor_rollout_ref.actor.entropy_checkpointing=True \
     actor_rollout_ref.ref.entropy_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.forward_prefetch=True \

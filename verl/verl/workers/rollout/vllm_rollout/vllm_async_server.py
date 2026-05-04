@@ -471,8 +471,8 @@ class vLLMHttpServer:
                 self.config.response_length, self.config.prompt_length + self.config.response_length - len(prompt_ids)
             )
 
-        # Clamp max_tokens to the valid range [0, max_possible_tokens]
-        max_tokens = max(0, min(max_tokens, max_possible_tokens))
+        # Clamp max_tokens to the valid range [1, max_possible_tokens]
+        max_tokens = max(1, min(max_tokens, max_possible_tokens))
 
         assert max_tokens <= max_possible_tokens, (
             f"max_tokens {max_tokens} exceeds available context space {max_possible_tokens}"

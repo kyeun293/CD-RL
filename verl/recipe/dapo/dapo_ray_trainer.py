@@ -45,6 +45,20 @@ from verl.utils.profiler import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
 
 
+def apply_prm_mask_soft(prm_scores: list[float]) -> list[float]:
+    """Cumulative product of per-step PRM probabilities.
+
+    e.g. [0.9, 0.8, 0.3] → [0.9, 0.72, 0.216]
+    The last value is the joint probability that all steps are correct.
+    """
+    mask: list[float] = []
+    cumulative = 1.0
+    for s in prm_scores:
+        cumulative *= s
+        mask.append(cumulative)
+    return mask
+
+
 class RayDAPOTrainer(RayPPOTrainer):
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
@@ -80,25 +94,23 @@ class RayDAPOTrainer(RayPPOTrainer):
             valid_response_ids = response_ids[:valid_len]
 
             if self._step_sep:
-                # Find step boundaries at token level so PRM (text) and ICM (ids) share
-                # the exact same step indices.
                 sep_positions = self._find_sep_positions(valid_response_ids)
-                boundaries = [-1] + sep_positions + [valid_len - 1]
+                # boundaries: preamble is [0, sep[0]), each step is [sep[k], sep[k+1])
+                # "Step" token is included at the START of each step segment (not end of prior).
+                boundaries = [0] + sep_positions + [valid_len]
                 step_id_segs = [
-                    valid_response_ids[boundaries[k] + 1 : boundaries[k + 1] + 1]
+                    valid_response_ids[boundaries[k] : boundaries[k + 1]]
                     for k in range(len(boundaries) - 1)
-                    if boundaries[k] + 1 <= boundaries[k + 1]
+                    if boundaries[k] < boundaries[k + 1]
                 ]
                 step_texts = [
                     self.tokenizer.decode(seg, skip_special_tokens=True).strip()
                     for seg in step_id_segs
                 ]
-                # Filter empty segments
                 non_empty = [(t, s) for t, s in zip(step_texts, step_id_segs) if t]
                 step_texts = [t for t, _ in non_empty]
                 step_id_segs = [s for _, s in non_empty]
-
-                # Drop preamble before first numbered step (e.g. "Step 1: ...")
+                # Drop preamble before first numbered step
                 first_step_idx = next(
                     (j for j, t in enumerate(step_texts) if re.match(r"Step\s*\d+", t, re.IGNORECASE)),
                     0,
@@ -109,10 +121,13 @@ class RayDAPOTrainer(RayPPOTrainer):
                 step_texts = []
                 step_id_segs = []
 
-            if i == 0:
-                print(f"[PARSE-DEBUG] sample i=0 | num_steps={len(step_texts)}")
-                for si, s in enumerate(step_texts):
-                    print(f"  step[{si}]: {repr(s[:120])}")
+            response_text = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
+
+            # if i == 0:
+            #     print(f"[PARSE-DEBUG] sample i=0 | num_steps={len(step_texts)}")
+            #     print(f"  raw_response: {repr(response_text[:300])}")
+            #     for si, s in enumerate(step_texts):
+            #         print(f"  step[{si}]: {repr(s[:120])}")
 
             all_steps.append(step_texts)
             all_step_ids.append(step_id_segs)
@@ -124,6 +139,8 @@ class RayDAPOTrainer(RayPPOTrainer):
     def _score_prm(self, batch):
         assert self._prm_scorer is not None
         all_labels = []
+        # [soft_mask 비활성]
+        # all_soft_masks = []
         for i in range(len(batch)):
             steps = batch.non_tensor_batch["parsed_steps"][i]
             if steps:
@@ -133,11 +150,17 @@ class RayDAPOTrainer(RayPPOTrainer):
                 valid_prompt_ids = prompt_ids[prompt_length - valid_prompt_len:]
                 problem_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
                 labels = self._prm_scorer.score_steps(problem_str, steps)
+                # [soft_mask 비활성]
+                # raw_scores = self._prm_scorer.score_steps_soft(problem_str, steps)
+                # soft_mask = apply_prm_mask_soft(raw_scores)
             else:
                 labels = []
+                # soft_mask = []
             print(f"[PRM-DEBUG] i={i} steps={len(steps)} labels={labels}")
             all_labels.append(labels)
+            # all_soft_masks.append(soft_mask)
         batch.non_tensor_batch["prm_labels"] = np.array(all_labels, dtype=object)
+        # [soft_mask 비활성] batch.non_tensor_batch["prm_soft_mask"] = np.array(all_soft_masks, dtype=object)
         return batch
 
     def compute_kl_related_metrics(self, batch: DataProto, metrics: dict, timing_raw: dict):

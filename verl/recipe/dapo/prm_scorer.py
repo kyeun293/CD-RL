@@ -173,3 +173,33 @@ class PRMScorer:
                 binary.append(1)
 
         return binary
+
+    @torch.no_grad()
+    def score_steps_soft(self, problem_text: str, steps: list[str]) -> list[float]:
+        """Return raw softmax probabilities (class 1) for each step — no thresholding.
+
+        e.g. [0.9, 0.8, 0.3, 0.9, 0.7]
+        """
+        if not steps:
+            return []
+
+        input_ids = self._build_input_ids(problem_text, steps)
+        if input_ids.shape[1] > self.max_length:
+            input_ids = input_ids[:, -self.max_length:]
+        input_ids = input_ids.to(self.device)
+
+        outputs = self.model(input_ids=input_ids, use_cache=False)
+        logits = outputs.logits  # (1, seq_len, 2)
+
+        all_positions = self._find_step_positions(input_ids)
+        step_positions = all_positions[-len(steps):] if len(all_positions) >= len(steps) else all_positions
+
+        step_scores: list[float] = []
+        for pos in step_positions:
+            probs = F.softmax(logits[0, pos], dim=-1)
+            step_scores.append(probs[1].item())
+
+        while len(step_scores) < len(steps):
+            step_scores.append(0.0)
+
+        return step_scores
