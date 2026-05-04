@@ -44,124 +44,17 @@ from verl.utils.metric import reduce_metrics
 from verl.utils.profiler import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
 
-
-def apply_prm_mask_soft(prm_scores: list[float]) -> list[float]:
-    """Cumulative product of per-step PRM probabilities.
-
-    e.g. [0.9, 0.8, 0.3] → [0.9, 0.72, 0.216]
-    The last value is the joint probability that all steps are correct.
-    """
-    mask: list[float] = []
-    cumulative = 1.0
-    for s in prm_scores:
-        cumulative *= s
-        mask.append(cumulative)
-    return mask
-
-
 class RayDAPOTrainer(RayPPOTrainer):
     """
     Note that this trainer runs on the driver process on a single CPU/GPU node.
     """
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         reward_kwargs = OmegaConf.to_container(self.config.reward.reward_kwargs, resolve=True)
-        prm_model_path = reward_kwargs.get("prm_model_path", None)
-        self._step_sep = reward_kwargs.get("step_sep", None)
-        if prm_model_path:
-            from recipe.dapo.prm_scorer import PRMScorer
-            self._prm_scorer = PRMScorer(prm_model_path)
-        else:
-            self._prm_scorer = None
-
-    def _find_sep_positions(self, token_ids):
-        """Return token indices whose decoded string ends with the step separator."""
-        positions = []
-        for j in range(len(token_ids)):
-            tok_str = self.tokenizer.decode([token_ids[j].item()])
-            if tok_str.endswith(self._step_sep):
-                positions.append(j)
-        return positions
-
-    def _attach_parsed_steps(self, batch):
-        all_steps = []
-        all_step_ids = []
-        for i in range(len(batch)):
-            response_ids = batch.batch["responses"][i]
-            response_length = response_ids.shape[-1]
-            valid_len = int(batch.batch["attention_mask"][i][-response_length:].sum().item())
-            valid_response_ids = response_ids[:valid_len]
-
-            if self._step_sep:
-                sep_positions = self._find_sep_positions(valid_response_ids)
-                # boundaries: preamble is [0, sep[0]), each step is [sep[k], sep[k+1])
-                # "Step" token is included at the START of each step segment (not end of prior).
-                boundaries = [0] + sep_positions + [valid_len]
-                step_id_segs = [
-                    valid_response_ids[boundaries[k] : boundaries[k + 1]]
-                    for k in range(len(boundaries) - 1)
-                    if boundaries[k] < boundaries[k + 1]
-                ]
-                step_texts = [
-                    self.tokenizer.decode(seg, skip_special_tokens=True).strip()
-                    for seg in step_id_segs
-                ]
-                non_empty = [(t, s) for t, s in zip(step_texts, step_id_segs) if t]
-                step_texts = [t for t, _ in non_empty]
-                step_id_segs = [s for _, s in non_empty]
-                # Drop preamble before first numbered step
-                first_step_idx = next(
-                    (j for j, t in enumerate(step_texts) if re.match(r"Step\s*\d+", t, re.IGNORECASE)),
-                    0,
-                )
-                step_texts = step_texts[first_step_idx:]
-                step_id_segs = step_id_segs[first_step_idx:]
-            else:
-                step_texts = []
-                step_id_segs = []
-
-            response_text = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-
-            # if i == 0:
-            #     print(f"[PARSE-DEBUG] sample i=0 | num_steps={len(step_texts)}")
-            #     print(f"  raw_response: {repr(response_text[:300])}")
-            #     for si, s in enumerate(step_texts):
-            #         print(f"  step[{si}]: {repr(s[:120])}")
-
-            all_steps.append(step_texts)
-            all_step_ids.append(step_id_segs)
-
-        batch.non_tensor_batch["parsed_steps"] = np.array(all_steps, dtype=object)
-        batch.non_tensor_batch["parsed_step_ids"] = np.array(all_step_ids, dtype=object)
-        return batch
-
-    def _score_prm(self, batch):
-        assert self._prm_scorer is not None
-        all_labels = []
-        # [soft_mask 비활성]
-        # all_soft_masks = []
-        for i in range(len(batch)):
-            steps = batch.non_tensor_batch["parsed_steps"][i]
-            if steps:
-                prompt_ids = batch.batch["prompts"][i]
-                prompt_length = prompt_ids.shape[-1]
-                valid_prompt_len = int(batch.batch["attention_mask"][i][:prompt_length].sum().item())
-                valid_prompt_ids = prompt_ids[prompt_length - valid_prompt_len:]
-                problem_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
-                labels = self._prm_scorer.score_steps(problem_str, steps)
-                # [soft_mask 비활성]
-                # raw_scores = self._prm_scorer.score_steps_soft(problem_str, steps)
-                # soft_mask = apply_prm_mask_soft(raw_scores)
-            else:
-                labels = []
-                # soft_mask = []
-            print(f"[PRM-DEBUG] i={i} steps={len(steps)} labels={labels}")
-            all_labels.append(labels)
-            # all_soft_masks.append(soft_mask)
-        batch.non_tensor_batch["prm_labels"] = np.array(all_labels, dtype=object)
-        # [soft_mask 비활성] batch.non_tensor_batch["prm_soft_mask"] = np.array(all_soft_masks, dtype=object)
-        return batch
+        self._use_curiosity = self.config.algorithm.get("use_curiosity", False)
+        self._step_sep = self.config.actor_rollout_ref.get("step_sep", None)
+        print(f"[INIT-DEBUG] use_curiosity: {self._use_curiosity}", flush=True)
+        print(f"[INIT-DEBUG] step_sep: {repr(self._step_sep)}", flush=True)
 
     def compute_kl_related_metrics(self, batch: DataProto, metrics: dict, timing_raw: dict):
         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -188,9 +81,45 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         if self.use_reference_policy:
             # compute reference log_prob
-            with marked_timer("ref", timing_raw, "olive"):
+            if "ref_log_prob" not in batch.batch:
                 ref_log_prob = self._compute_ref_log_prob(batch)
                 batch = batch.union(ref_log_prob)
+            else:
+                print("ref_log_prob already in batch, skipping computation", flush=True)
+
+        return batch
+    
+    def add_intrinsic_reward(self, batch, curiosity_result):
+        """
+        batch: DataProto
+        curiosity_result: DataProto, non_tensor_batch에 "intrinsic_reward", "pair_map", "step_boundaries" 포함
+
+        batch에 token_level_intrinsic_rewards 추가하기
+        """
+        prm_labels = curiosity_result.non_tensor_batch["prm_labels"]
+        intrinsic_reward = curiosity_result.non_tensor_batch["intrinsic_reward"]
+        pair_map = curiosity_result.non_tensor_batch["pair_map"]
+        step_boundary_list = curiosity_result.non_tensor_batch["step_boundaries"]
+        intrinsic_reward_flat = [reward for rewards in intrinsic_reward for reward in rewards]
+        pair_map_flat = [pair for pairs in pair_map for pair in pairs]
+
+        # prm_total = sum(len(prm_labels[i]) for i in range(len(prm_labels)))
+        # step_total = sum(len(step_boundary_list[i]) - 1 for i in range(len(step_boundary_list)))
+        # print(f"pair_map is sorted: {all(pair_map[i][0] <= pair_map[i+1][0] for i in range(len(pair_map)-1))}", flush=True)
+        # print(f"pair_map sample: {pair_map[:10]}", flush=True)
+        # print(f"pair_map len: {len(pair_map_flat)}, intrinsic_reward len: {len(intrinsic_reward_flat)}, prm_labels len: {prm_total}, step_boundaries len: {step_total}", flush=True)
+        # pair_map len: 1557, intrinsic_reward len: 1557, prm_labels len: 1557, step_boundaries len: 1557
+
+        for k, (data_idx, step_idx) in enumerate(pair_map_flat):
+            boundary = step_boundary_list[data_idx]
+            start = boundary[step_idx]
+            end = boundary[step_idx + 1]
+            prm_label = prm_labels[data_idx][step_idx]
+
+            if self.config.actor_rollout_ref.icm.intrinsic_reward_token == "all_step_tokens":
+                batch.batch["token_level_rewards"][data_idx, start:end] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward_flat[k].item() * prm_label
+            elif self.config.actor_rollout_ref.icm.intrinsic_reward_token == "last_step_token":
+                batch.batch["token_level_rewards"][data_idx, end - 1] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward_flat[k].item() * prm_label
 
         return batch
 
@@ -282,13 +211,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, "red"):
+                        print(f"[GEN-DEBUG] Generating responses", flush=True)
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                        gen_batch_output = self._attach_parsed_steps(gen_batch_output)
-                        if self._prm_scorer is not None:
-                            gen_batch_output = self._score_prm(gen_batch_output)
-                        timing_raw.update(gen_batch_output.meta_info["timing"])
-                        gen_batch_output.meta_info.pop("timing", None)
-
+                        
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, "red"):
                             gen_baseline_batch = deepcopy(gen_batch)
@@ -416,7 +341,30 @@ class RayDAPOTrainer(RayPPOTrainer):
                             traj_bsz = self.config.data.train_batch_size * self.config.actor_rollout_ref.rollout.n
                             batch = batch[:traj_bsz]
 
+                    # print(f"batch: {batch}", flush=True)
                     self.checkpoint_manager.sleep_replicas()
+
+                    # calculate curiosity score if needed
+                    if self._use_curiosity:
+                        with marked_timer("curiosity", timing_raw, "magenta"):
+                            print(f"[CURIO-DEBUG] Computing curiosity scores", flush=True)
+                            batch_size =len(batch.batch)
+                            batch.meta_info["step_sep"] = self._step_sep
+                            batch.non_tensor_batch["global_indices"] = np.arange(batch_size)
+                            curiosity_result = self.actor_rollout_wg.compute_curiosity(batch)  
+
+                        batch.batch["ref_log_prob"] = curiosity_result.batch["ref_log_prob"]
+                        metrics["train/icm_loss"] = curiosity_result.non_tensor_batch["icm_loss"].mean().item()
+
+                        # intrinsic reward을 token_level_rewards에 더하기
+                        # check_tensor = batch.batch["token_level_rewards"][0]
+                        # nonzero_indices = check_tensor.nonzero(as_tuple=True)[0]
+                        # print(f"[ICM-DEBUG] nonzero positions: {nonzero_indices.tolist()}")
+                        # print(f"[ICM-DEBUG] nonzero values: {check_tensor[nonzero_indices].tolist()}")
+                        batch = self.add_intrinsic_reward(batch, curiosity_result)
+                        # nonzero_indices = batch.batch["token_level_rewards"][0].nonzero(as_tuple=True)[0]
+                        # print(f"[ICM-DEBUG] nonzero positions: {nonzero_indices.tolist()}")
+                        # print(f"[ICM-DEBUG] nonzero values: {batch.batch['token_level_rewards'][0][nonzero_indices].tolist()}")
 
                     # === Updating ===
                     # Balance the number of valid tokens across DP ranks.
@@ -499,6 +447,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                     if rollout_data_dir:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
+                for key, val in timing_raw.items():
+                    print(f"[TIMING] {key}: {val:.3f}s", flush=True)
+
                 # validate
                 if self.config.trainer.test_freq > 0 and (
                     is_last_step or self.global_steps % self.config.trainer.test_freq == 0
@@ -552,6 +503,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                 progress_bar.update(1)
                 self.global_steps += 1
                 self.gen_steps += 1
+
         # check if last step checkpint exists
         checkpoint_dir = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
         if not os.path.exists(checkpoint_dir):

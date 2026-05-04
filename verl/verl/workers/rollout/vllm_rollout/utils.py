@@ -267,7 +267,9 @@ class vLLMColocateWorkerExtension:
         """Get ZMQ handle for communication."""
         if not hasattr(self, "device_uuid") or not self.device_uuid:
             self.device_uuid = get_device_uuid(self.device.index)
-        return f"ipc:///tmp/rl-colocate-zmq-{self.device_uuid}.sock"
+        zmq_dir = os.environ.get("VERL_ZMQ_DIR", "/tmp")
+        zmq_handle = f"ipc:///{zmq_dir}/rl-colocate-zmq-{self.device_uuid}.sock"
+        return zmq_handle
 
 
 class vLLMOmniColocateWorkerExtension(_OmniWorkerBase):

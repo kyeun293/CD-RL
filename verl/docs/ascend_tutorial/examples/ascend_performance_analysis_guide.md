@@ -16,11 +16,11 @@ Last updated: 02/24/2026.
 
 ![rl_data_stream](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/rl_data_stream.png)
 
-## profiling工具使能
+## profilling工具使能
 
 ### 使能方法
 
-使能和配置教程可参考：[verl/docs/ascend_tutorial/profiling/ascend_profiling_zh.rst at main · verl-project/verl](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/profiling/ascend_profiling_zh.rst)
+使能和配置教程可参考：[verl/docs/ascend_tutorial/profiling/ascend_profiling_zh.rst at main · verl-project/verl](https://github.com/verl-project/verl/raw/main/docs/ascend_tutorial/profiling/ascend_profiling_zh.rst)
 
 ## 性能分析方法论
 
@@ -38,6 +38,7 @@ Last updated: 02/24/2026.
 
 - **操作**：通过MindStudio Insight直接查看MSTX打点数据，观察Rollout阶段不同DP Rank的负载均衡情况
 - **价值**：快速识别负载不均问题
+
 - **效果展示：**
 
 ![Load_Balancing_Analysis](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/Load_Balancing_Analysis.gif)
@@ -56,7 +57,9 @@ Last updated: 02/24/2026.
 #### 性能分析
 
 - **操作**：可通过 MindStudio Insight Windows 或 Linux 版本加载 Profiling 数据
+
 - **价值**：MindStudio Insight 支持分析任务调度效率、算子执行性能、计算资源利用率、集合通信性能等。其 Timeline 视图具备任务拆解与 Overlap 分析功能（**为 MindStudio 独有核心特性，在 NV 及其他竞品中不具备，是 AI 调优的必备工具**），并支持鼠标交互式分析。
+
 - **效果展示**：
 
 ![performance%20analysis](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/performance%20analysis.png)
@@ -113,13 +116,15 @@ host bound是指CPU任务量综合大于NPU，导致NPU执行出现空泡的现�
 
 ### 3.算子性能初诊
 
-需要利用 `".\ASCEND_PROFILER_OUTPUT\operator_details.csv"`来做分析，从而判断算子是否有性能问题。
+需要利用`".\ASCEND_PROFILER_OUTPUT\operator_details.csv"`来做分析，从而判断算子识否有性能问题。
 
-Profiling工具会统计这些流水线在不同核上的平均繁忙时间（xxx_time），与最慢核的完整kernel耗时（task_duration）做除法，得到流水线利用率（xxx_ratio）。这些流水线之间虽然互有依赖，且搬运类流水线会互抢带宽，但算子只要设计得当，是可以做到互相掩盖的。因此我们可以初步认为，**当算子的执行耗时大到一定程度上，算子应当在某一条流水线上形成bound**，即利用率要高到一定程度。经验上，在单算子耗时达到50μs时，就可以认为算子应当在bound流水线上，达成80%+的占用率了。
+Profiling工具会统计这些流水线在不同核上的平均繁忙时间（xxx_time），与最慢核的完整kernel耗时（task_duration）做除法，得到流水线利用率（xxx_ratio）。这些流水线之间虽然互有依赖，且搬运类流水线会互抢带宽，但算子只要设计得当，是可以做到互相掩盖的。因此我们可以初步认为，**当算子的执行耗时大到一定程度上，算子应当在某一条流水线上形成bound**，即利用率要高到一定程度。经验上，在单算子耗时达到50μ时，就可以认为算子应当在bound流水线上，达成80%+的占用率了。
 
 以下图为例，第一行是一个FA算子，第二行是一个Matmul算子，FA在vec流水线上达到了88.1%的利用率，Matmul算子在mac流水线上达到了89.8%的利用率，他们的性能可以认为是合格的。
 
 ![Operator%20performance](https://github.com/chengminhua/verl_data/raw/main/MindStudio_Insight_use/Operator%20performance.png)
+
+
 
 ### 4.亲和shape调整
 
@@ -143,7 +148,7 @@ mte2是一个自身效率严重受shape影响的流水线。要想让mte2保证�
 
 首先，我们明确出当前NPU卡是多少核的，如果不清楚，跑出来的profiling里都是20，40这样的数，就说明是20核，反之是24核。这里我的24核其实是代表了一个cube和两个vector组成的小组，我们可以认为是一个cube作为主核，带了两个vector作为从核。如果一个算子是纯vector算子，那么就不再有组的概念，40或48个vector核会作为主核直接独立去拿逻辑任务。
 
-对于LLM中的vector算子，它的一种常见分核策略有可能是分在最高维，也就是batch维，常见于对低维（也叫尾轴）有规约操作的norm类、动态量化类等算子；另一种是整体拍平，允许算子切分的非常细的算子，如elementwise算子。对于第一种，我们就可以在模型侧关注它的负载均衡问题。例如我们打48batch，而硬件却是个40个vector核，那这40个核会循环2次，第二次有多数的核会无事可做，这个batch数就可以认为是不友好的。如果将batch打到64或80，性能可以预见会是无损的。同样的情况下，如果是48核的卡，那我们可以认为这就是个非常友好的batch数。
+对于LLM中的vector算子，它的一种常见分核策略有可能是分在最高维，也就是batch维，常见于对低维（也叫尾轴）有规约操作的norm类、动态量化类等算子；另一种是整体拍平，允许算子切分的非常细的算子，如elementwse算子。对于第一种，我们就可以在模型侧关注它的负载均衡问题。例如我们打48batch，而硬件却是个40个vector核，那这40个核会循环2次，第二次有多数的核会无事可做，这个batch数就可以认为是不友好的。如果将batch打到64或80，性能可以预见会是无损的。同样的情况下，如果是48核的卡，那我们可以认为这就是个非常友好的batch数。
 
 对于cube类算子，它常见的分核策略是以base快去切分M和N（K轴是累加轴，对它分核会引入确定性问题）。最常见的分块是baseM=128，baseN=256。在decode阶段，我们的耗时基本可以看做都是在搬权重，这是因为激活的M极小，M方向大概率只分了一块，那么右矩阵就只需要搬一次。所以我们在M≤128的范围内可以尽情提高M，对性能都基本是无损的，如果M大于128，可以认为(128, 256]是下一个性能分档。
 除了M外，N轴切分的任务也影响算子亲和性，以deepseekR1中的MLA预处理为例，它会使用同一个激活（shape为[batch_size, 7168]）与两个权重做矩阵乘(shape为[7168, 1536]和[7168, 576])。在batch_size打不大的情况下，即使baseN缩短为128，N轴都不能用满核数，所以此时这两个矩阵乘各自的耗时，会约等于将他们权重N轴拼起来乘(shape为[7168, 2112])的矩阵乘的耗时。如果仅考虑模型竞争力，我们更希望对这两个权重做合并，否则两个小的矩阵乘带宽利用率都会非常差。
@@ -151,3 +156,14 @@ mte2是一个自身效率严重受shape影响的流水线。要想让mte2保证�
 对于Attention算子，它常见的分核策略是q_seqlen、batch_size和kv_headnum。增量阶段q_seqlen会以MTP和GQA倍数做合并，但是通常也不会大过128，划分不出第二个任务，那么并行度基本就是batch_size * kv_headnum。
 
 总的来说，我们可以依据shape信息和算子类别，对算子是否有负载均衡问题作出识别，从而对我们切分策略选择，最高吞吐量的batch策略作出预判。
+
+
+
+
+
+
+
+
+
+
+

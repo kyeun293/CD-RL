@@ -35,7 +35,7 @@ from verl.experimental.agent_loop.utils import resolve_config_path
 from verl.protocol import DataProto
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.dataset.rl_dataset import get_dataset_class
-from verl.workers.config import DiffusionModelConfig, DiffusionRolloutConfig
+from verl.workers.config import DiffusionModelConfig, RolloutConfig
 
 
 class DiffusionAgentLoopOutput(BaseModel):
@@ -46,9 +46,9 @@ class DiffusionAgentLoopOutput(BaseModel):
     prompt_ids: list[int]
     """Prompt token ids."""
     response_diffusion_output: Any
-    """Response diffusion output (torch.Tensor): image tensor (CHW) / video tensor (TCHW)."""
+    """Response diffusion output: image tensor (CHW) / video tensor (TCHW)."""
     response_logprobs: Optional[Any] = None
-    """Log probabilities for the response tokens. (torch.Tensor)"""
+    """Log probabilities for the response tokens."""
     multi_modal_data: Optional[dict[str, Any]] = None
     """Multi-modal data for multi-modal tools."""
     reward_score: Optional[float] = None
@@ -87,10 +87,7 @@ class DiffusionAgentLoopWorker:
 
     Args:
         config (DictConfig): whole config for main entrypoint.
-        servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
-        load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
-        teacher_servers (list[tuple[str, ray.actor.ActorHandle]]): Not used.
-        teacher_load_balancer_handle (ray.actor.ActorHandle): Not used.
+        server_handles (List[ray.actor.ActorHandle]): OpenAI compatible LLM server actor handles.
         reward_loop_worker_handles (List[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
     """
 
@@ -99,13 +96,20 @@ class DiffusionAgentLoopWorker:
         config: DictConfig,
         servers: list[tuple[str, ray.actor.ActorHandle]],
         load_balancer_handle: ray.actor.ActorHandle,
+        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
         teacher_servers: list[tuple[str, ray.actor.ActorHandle]] = None,
         teacher_load_balancer_handle: ray.actor.ActorHandle = None,
-        reward_loop_worker_handles: list[ray.actor.ActorHandle] = None,
     ):
+        """Initialize agent loop manager.
+        Args:
+            config (DictConfig): YAML config.
+            servers (list[tuple[str, ray.actor.ActorHandle]]): (address, handle) pairs for each LLM server.
+            load_balancer_handle (ray.actor.ActorHandle): shared global load balancer actor.
+            reward_loop_worker_handles (list[ray.actor.ActorHandle]): Actor handles for streaming reward computation.
+        """
         self.config = config
         rollout_config, model_config = _get_rollout_and_model_config(config)
-        self.rollout_config: DiffusionRolloutConfig = omega_conf_to_dataclass(rollout_config)
+        self.rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_config)
         self.model_config: DiffusionModelConfig = omega_conf_to_dataclass(model_config)
 
         if not hasattr(self, "server_manager"):
@@ -162,7 +166,6 @@ class DiffusionAgentLoopWorker:
             logprobs=config.calculate_log_probs,
         )
 
-        # override sampling params for validation
         if batch.meta_info.get("validate", False):
             sampling_params["num_inference_steps"] = config.val_kwargs.num_inference_steps
             sampling_params["seed"] = config.val_kwargs.seed
@@ -239,11 +242,17 @@ class DiffusionAgentLoopWorker:
             prompt_output["input_ids"] = prompt_output["input_ids"].unsqueeze(0)
             prompt_output["attention_mask"] = prompt_output["attention_mask"].unsqueeze(0)
 
-        response_diffusion_output = output.response_diffusion_output.unsqueeze(0)
+        if isinstance(output.response_diffusion_output, torch.Tensor):
+            response_diffusion_output = output.response_diffusion_output.unsqueeze(0)
+        else:
+            response_diffusion_output = torch.tensor(output.response_diffusion_output).unsqueeze(0)
 
         response_logprobs = None
         if output.response_logprobs is not None:
-            response_logprobs = output.response_logprobs.unsqueeze(0)
+            if isinstance(output.response_logprobs, torch.Tensor):
+                response_logprobs = output.response_logprobs.unsqueeze(0)
+            else:
+                response_logprobs = torch.tensor(output.response_logprobs).unsqueeze(0)
 
         attention_mask = prompt_output["attention_mask"]
         input_ids = prompt_output["input_ids"]
@@ -327,7 +336,8 @@ class DiffusionAgentLoopWorker:
         batch = TensorDict(
             {
                 "prompts": prompt_ids,  # [bsz, prompt_length]
-                "responses": response_diffusion_output,  # [bsz, C, H, W] or [bsz, T, C, H, W]
+                # responses: [bsz, C, H, W] image or [bsz, T, C, H, W] video
+                "responses": response_diffusion_output,
                 "input_ids": input_ids,  # [bsz, prompt_length]
                 "attention_mask": attention_mask,  # [bsz, prompt_length]
                 **optional_outputs,

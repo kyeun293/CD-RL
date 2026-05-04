@@ -47,10 +47,9 @@ _BYTES_1MB = 1 << 20
         ),
     ],
 )
-@pytest.mark.asyncio
-async def test_get_named_tensor_buckets(named_tensors, bucket_size_mb, gt_groups: list[list[str]]):
+def test_get_named_tensor_buckets(named_tensors, bucket_size_mb, gt_groups: list[list[str]]):
     named_tensors_iter = iter(named_tensors)
-    groups = [g async for g in get_named_tensor_buckets(named_tensors_iter, bucket_size_mb)]
+    groups = list(get_named_tensor_buckets(named_tensors_iter, bucket_size_mb))
     assert len(groups) == len(gt_groups)
     for group, gt_group in zip(groups, gt_groups, strict=True):
         assert len(group) == len(gt_group)

@@ -1,7 +1,22 @@
-#!/usr/bin/env bash
-set -uxo pipefail
+#!/bin/bash
+#SBATCH --job-name=prepare_dapo_data
+#SBATCH --partition=a6000
+#SBATCH --nodelist=node03
+#SBATCH --gres=gpu:0
+#SBATCH --time=14-0:00:00
+#SBATCH --mem=10G
+#SBATCH --cpus-per-task=4
+#SBATCH --output=/home/yejin/data/projects/yejin/Curiosity/CD-RL/verl/my_scripts/logs/prepare_dapo_data.out
 
-export VERL_HOME=${VERL_HOME:-"${HOME}/verl"}
+# conda 환경 활성화
+ml purge
+ml load cuda/12.1
+eval "$(conda shell.bash hook)"
+conda activate verl
+
+basepath=/home/yejin/data/projects/yejin/Curiosity/CD-RL/verl
+
+export VERL_HOME=${VERL_HOME:-"${basepath}"}
 export TRAIN_FILE=${TRAIN_FILE:-"${VERL_HOME}/data/dapo-math-17k.parquet"}
 export TEST_FILE=${TEST_FILE:-"${VERL_HOME}/data/aime-2024.parquet"}
 export OVERWRITE=${OVERWRITE:-0}

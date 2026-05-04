@@ -1016,7 +1016,7 @@ class FSDPEngineWithLMHead(FSDPEngine):
         use_fused_kernels = tu.get_non_tensor_data(data=micro_batch, key="use_fused_kernels", default=False)
         calculate_entropy = tu.get_non_tensor_data(data=micro_batch, key="calculate_entropy", default=False)
         distillation_use_topk = tu.get_non_tensor_data(data=micro_batch, key="distillation_use_topk", default=False)
-
+            
         model_output = {}
 
         input_ids = micro_batch["input_ids"]
@@ -1131,19 +1131,67 @@ class FSDPEngineWithLMHead(FSDPEngine):
         if calculate_entropy:
             model_output["entropy"] = entropy
 
-        return model_output
+        # hidden states 추가
+        output_hidden_states = tu.get_non_tensor_data(
+            data=micro_batch, key="output_hidden_states", default=False
+        )
+        if output_hidden_states and hasattr(output, "hidden_states") and output.hidden_states is not None:
+            # last layer hidden state만 반환
+            last_hidden = output.hidden_states[-1]  # [batch, seq_len, hidden_dim]
+            
+            if use_remove_padding:
+                # rmpad 모드면 nested tensor로 변환
+                cu_seqlens = input_ids.offsets()
+                last_hidden = last_hidden.squeeze(0)  # [total_nnz, hidden_dim]
+                
+                # SP gather 추가
+                if self.use_ulysses_sp:
+                    pad_size = output_args["pad_size"]
+                    last_hidden = gather_outputs_and_unpad(
+                        last_hidden,
+                        gather_dim=0,
+                        unpad_dim=0,
+                        padding_size=pad_size,
+                    )
+                
+                last_hidden = torch.nested.nested_tensor_from_jagged(last_hidden, cu_seqlens)
+            else:
+                # 제대로 구현 X
+                cu_seqlens = input_ids.offsets()
+                seq_lengths = cu_seqlens.diff()
+                starts = torch.zeros_like(seq_lengths, dtype=torch.int64)
+                last_hidden = torch.nested.narrow(last_hidden, 1, starts, seq_lengths, layout=torch.jagged)
+                last_hidden_rmpad = torch.cat([t for t in last_hidden.unbind()])  # (total_nnz, hidden_dim)
+                last_hidden = torch.nested.nested_tensor_from_jagged(last_hidden_rmpad, cu_seqlens)
+            
+            model_output["hidden_states"] = last_hidden
+
+        return model_output 
 
     def forward_step(self, micro_batch: TensorDict, loss_function, forward_only):
         device_name = get_device_name()
         # actually, we should avoid assigning like this...
         micro_batch = micro_batch.to(get_device_id())
+        # print(f"transformer_impl.py micro_batch: {micro_batch.batch_size}", flush=True) #torch.Size([21])
         model_inputs, output_args = self.prepare_model_inputs(micro_batch=micro_batch)
 
+        # hidden states 반환할지
+        output_hidden_states = tu.get_non_tensor_data(
+            data=micro_batch, key="output_hidden_states", default=False
+        )
+
         with torch.autocast(device_type=device_name, dtype=torch.bfloat16):
+            # print(f"transformer_impl.py input_ids: {model_inputs['input_ids'].shape}", flush=True) # torch.Size([1, 3682])
+
             raw_output = self.module(
                 **model_inputs,
                 use_cache=False,
+                output_hidden_states=output_hidden_states,
             )  # prevent model thinks we are generating
+
+            # if output_hidden_states:
+            #     print(f"transformer_impl.py: raw_output hidden_states length: {len(raw_output.hidden_states)}", flush=True) # input + n layers = 37
+            #     print(f"transformer_impl.py: raw_output hidden_states shape: {raw_output.hidden_states[0].shape}", flush=True) # torch.Size([1, 3682, 2048])
 
             model_output = self.prepare_model_outputs(
                 output=raw_output, output_args=output_args, micro_batch=micro_batch, logits_processor_func=loss_function
@@ -1206,7 +1254,7 @@ class FSDPEngineWithValueHead(FSDPEngineWithLMHead):
                 # For trl.AutoModelForCausalLMWithValueHead
                 values = output[2]
             else:
-                values = output.logits.squeeze(-1)
+                values = output.logits
 
             if pad_mode == DatasetPadMode.NO_PADDING:
                 cu_seqlens = input_ids.offsets()

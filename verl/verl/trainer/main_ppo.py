@@ -56,13 +56,16 @@ def run_ppo(config, task_runner_class=None) -> None:
                 model paths, and training hyperparameters.
         task_runner_class: For recipe to change TaskRunner.
     """
+    print("Running run_ppo...", flush=True)
     # Check if Ray is not initialized
     if not ray.is_initialized():
+        print("Ray is not initialized. Initializing Ray now...", flush=True)
         # Initialize Ray with a local cluster configuration
         # Set environment variables in the runtime environment to control tokenizer parallelism,
         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
         # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
         default_runtime_env = get_ppo_ray_runtime_env()
+        print(f"Default PPO Ray runtime environment: {default_runtime_env}", flush=True)
         ray_init_kwargs = config.ray_kwargs.get("ray_init", {})
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
 
@@ -74,8 +77,9 @@ def run_ppo(config, task_runner_class=None) -> None:
 
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
-        print(f"ray init kwargs: {ray_init_kwargs}")
+        print(f"ray init kwargs: {ray_init_kwargs}", flush=True)
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
+        print("Ray initialized successfully.", flush=True)
 
     if task_runner_class is None:
         task_runner_class = ray.remote(num_cpus=1)(TaskRunner)  # please make sure main_task is not scheduled on head
@@ -163,7 +167,10 @@ class TaskRunner:
             actor_rollout_cls = AsyncActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
 
-        elif config.actor_rollout_ref.actor.strategy in {"veomni", "torchtitan", "mindspeed"}:
+        elif (
+            config.actor_rollout_ref.actor.strategy == "veomni"
+            or config.actor_rollout_ref.actor.strategy == "torchtitan"
+        ):
             raise NotImplementedError(
                 f"{config.actor_rollout_ref.actor.strategy} does not support legacy worker implementation"
             )
@@ -199,7 +206,7 @@ class TaskRunner:
 
                 CriticWorker = TrainingWorker
                 print("Using new worker implementation")
-        elif config.critic.strategy in {"veomni", "torchtitan", "mindspeed"}:
+        elif config.critic.strategy == "veomni" or config.critic.strategy == "torchtitan":
             if use_legacy_worker_impl == "disable":
                 from verl.workers.engine_workers import TrainingWorker
 
