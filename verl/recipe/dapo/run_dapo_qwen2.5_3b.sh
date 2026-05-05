@@ -4,7 +4,7 @@ source /home/soo/miniconda3/etc/profile.d/conda.sh
 conda activate verl
 
 # GPU 설정
-GPU_ID=2,3,4,5
+GPU_ID=0,1,6,7
 export CUDA_VISIBLE_DEVICES=$GPU_ID
 NNODES=1
 NGPUS_PER_NODE=4 # 학습용 gpu 수
@@ -19,7 +19,7 @@ export PYTHONPATH=$basepath:$PYTHONPATH
 
 # 기록
 project_name='DAPO'
-exp_name='DAPO-Qwen2.5-3B'
+exp_name='DAPO-Qwen2.5-3B-Instruct'
 LOG_OUTPUT=/home/soo/yejin/CD-RL/verl/my_scripts/logs
 
 # ─── 시작 전 이전 잔여 프로세스 정리 ────────────────────────────────────────
@@ -77,10 +77,10 @@ export RAY_TMPDIR=/dev/shm/yejin_ray_tmp
 mkdir -p $RAY_TMPDIR
 export VERL_ZMQ_DIR=/dev/shm
 
-MODEL_PATH=${MODEL_PATH:-"${basepath}/models/Qwen2.5-3B"}
+MODEL_PATH=${MODEL_PATH:-"${basepath}/models/Qwen2.5-3B-Instruct"}
 PRM_MODEL_PATH=${PRM_MODEL_PATH:-"${basepath}/models/Qwen2.5-Math-PRM-7B"}
 CKPTS_DIR=${CKPTS_DIR:-"${basepath}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${basepath}/data/dapo-math-17k.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"${basepath}/data/dapo-math-1.7k.parquet"}
 TEST_FILE=${TEST_FILE:-"${basepath}/data/aime-2024.parquet"}
 
 # Algorithm
@@ -198,6 +198,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
+    trainer.save_curiosity_scores=True \
     actor_rollout_ref.actor.entropy_checkpointing=True \
     actor_rollout_ref.ref.entropy_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.forward_prefetch=True \

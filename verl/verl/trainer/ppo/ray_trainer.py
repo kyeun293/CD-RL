@@ -320,6 +320,12 @@ class RayPPOTrainer:
 
         self.checkpoint_manager = None
 
+        self._use_curiosity = self.config.algorithm.get("use_curiosity", False)
+        self._step_sep = self.config.actor_rollout_ref.get("step_sep", None)
+        print(f"[INIT-DEBUG] use_curiosity: {self._use_curiosity}", flush=True)
+        print(f"[INIT-DEBUG] step_sep: {repr(self._step_sep)}", flush=True)
+
+
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
         Creates the train and validation dataloaders.
@@ -1296,6 +1302,40 @@ class RayPPOTrainer:
             critic_output = self.critic_wg.update_critic(batch)
         return critic_output
 
+    def add_intrinsic_reward(self, batch, curiosity_result):
+        """
+        batch: DataProto
+        curiosity_result: DataProto, non_tensor_batch에 "intrinsic_reward", "pair_map", "step_boundaries" 포함
+
+        batch에 token_level_intrinsic_rewards 추가하기
+        """
+        prm_labels = curiosity_result.non_tensor_batch["prm_labels"]
+        intrinsic_reward = curiosity_result.non_tensor_batch["intrinsic_reward"]
+        pair_map = curiosity_result.non_tensor_batch["pair_map"]
+        step_boundary_list = curiosity_result.non_tensor_batch["step_boundaries"]
+        intrinsic_reward_flat = [reward for rewards in intrinsic_reward for reward in rewards]
+        pair_map_flat = [pair for pairs in pair_map for pair in pairs]
+
+        # prm_total = sum(len(prm_labels[i]) for i in range(len(prm_labels)))
+        # step_total = sum(len(step_boundary_list[i]) - 1 for i in range(len(step_boundary_list)))
+        # print(f"pair_map is sorted: {all(pair_map[i][0] <= pair_map[i+1][0] for i in range(len(pair_map)-1))}", flush=True)
+        # print(f"pair_map sample: {pair_map[:10]}", flush=True)
+        # print(f"pair_map len: {len(pair_map_flat)}, intrinsic_reward len: {len(intrinsic_reward_flat)}, prm_labels len: {prm_total}, step_boundaries len: {step_total}", flush=True)
+        # pair_map len: 1557, intrinsic_reward len: 1557, prm_labels len: 1557, step_boundaries len: 1557
+
+        for k, (data_idx, step_idx) in enumerate(pair_map_flat):
+            boundary = step_boundary_list[data_idx]
+            start = boundary[step_idx]
+            end = boundary[step_idx + 1]
+            prm_label = prm_labels[data_idx][step_idx]
+
+            if self.config.actor_rollout_ref.icm.intrinsic_reward_token == "all_step_tokens":
+                batch.batch["token_level_rewards"][data_idx, start:end] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward_flat[k].item() * prm_label
+            elif self.config.actor_rollout_ref.icm.intrinsic_reward_token == "last_step_token":
+                batch.batch["token_level_rewards"][data_idx, end - 1] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward_flat[k].item() * prm_label
+
+        return batch
+
     def fit(self):
         """
         The training loop of PPO.
@@ -1397,6 +1437,7 @@ class RayPPOTrainer:
                         gen_batch_output.meta_info.pop("timing", None)
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+                        print("Computing REMAX baseline...", flush=True)
                         with marked_timer("gen_max", timing_raw, color="purple"):
                             gen_baseline_batch = deepcopy(gen_batch)
                             gen_baseline_batch.meta_info["do_sample"] = False
@@ -1467,6 +1508,7 @@ class RayPPOTrainer:
                     rollout_corr_config = self.config.algorithm.get("rollout_correction", None)
                     bypass_recomputing_logprobs = rollout_corr_config and rollout_corr_config.get("bypass_mode", False)
                     if bypass_recomputing_logprobs:  # Use `rollout_log_probs`
+                        print("Using bypass mode for rollout correction: skipping recomputation of old_log_probs and using rollout_log_probs directly.", flush=True)
                         from verl.trainer.ppo.rollout_corr_helper import apply_bypass_mode
 
                         apply_bypass_mode(
@@ -1475,6 +1517,7 @@ class RayPPOTrainer:
                             policy_loss_config=self.config.actor_rollout_ref.actor.policy_loss,
                         )
                     else:  # Recompute old_log_probs
+                        print("Using decoupled mode for rollout correction: recomputing old_log_probs to serve as stable reference for policy updates.", flush=True)
                         with marked_timer("old_log_prob", timing_raw, color="blue"):
                             old_log_prob, old_log_prob_mfu = self._compute_old_log_prob(batch)
                             entropys = old_log_prob.batch["entropys"]
@@ -1531,13 +1574,37 @@ class RayPPOTrainer:
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
+                            print("Applying KL penalty to rewards", flush=True)
                             batch, kl_metrics = apply_kl_penalty(
                                 batch, kl_ctrl=self.kl_ctrl_in_reward, kl_penalty=self.config.algorithm.kl_penalty
                             )
                             metrics.update(kl_metrics)
                         else:
+                            print("Not applying KL penalty to rewards", flush=True)
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
 
+                        # calculate curiosity score if needed
+                        if self._use_curiosity:
+                            with marked_timer("curiosity", timing_raw, "magenta"):
+                                print(f"[CURIO-DEBUG] Computing curiosity scores", flush=True)
+                                batch_size =len(batch.batch)
+                                batch.meta_info["step_sep"] = self._step_sep
+                                batch.non_tensor_batch["global_indices"] = np.arange(batch_size)
+                                curiosity_result = self.actor_rollout_wg.compute_curiosity(batch)  
+
+                            batch.batch["ref_log_prob"] = curiosity_result.batch["ref_log_prob"]
+                            metrics["train/icm_loss"] = curiosity_result.non_tensor_batch["icm_loss"].mean().item()
+
+                            # intrinsic reward을 token_level_rewards에 더하기
+                            # check_tensor = batch.batch["token_level_rewards"][0]
+                            # nonzero_indices = check_tensor.nonzero(as_tuple=True)[0]
+                            # print(f"[ICM-DEBUG] nonzero positions: {nonzero_indices.tolist()}")
+                            # print(f"[ICM-DEBUG] nonzero values: {check_tensor[nonzero_indices].tolist()}")
+                            batch = self.add_intrinsic_reward(batch, curiosity_result)
+                            # nonzero_indices = batch.batch["token_level_rewards"][0].nonzero(as_tuple=True)[0]
+                            # print(f"[ICM-DEBUG] nonzero positions: {nonzero_indices.tolist()}")
+                            # print(f"[ICM-DEBUG] nonzero values: {batch.batch['token_level_rewards'][0][nonzero_indices].tolist()}")
+                        
                         # Compute rollout correction: IS weights, rejection sampling, and metrics
                         # Only runs in decoupled mode (computes once per batch using stable π_old)
                         # In bypass mode, this is skipped - actor computes metrics from evolving π_θ vs π_rollout
@@ -1615,6 +1682,9 @@ class RayPPOTrainer:
                     if rollout_data_dir:
                         self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
 
+                for key, val in timing_raw.items():
+                    print(f"[TIMING] {key}: {val:.3f}s", flush=True)
+                    
                 # validate
                 if self.config.trainer.test_freq > 0 and (
                     is_last_step or self.global_steps % self.config.trainer.test_freq == 0

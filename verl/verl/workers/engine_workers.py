@@ -1155,6 +1155,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 "pair_map": np.array(pair_map_per_sample, dtype=object),
                 "step_boundaries": step_boundaries,
                 "icm_loss": np.array([icm_loss_val] * batch_size, dtype=np.float32),
+                "parsed_steps": batch.non_tensor_batch["parsed_steps"],
             }
         )
 
@@ -1165,6 +1166,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         torch.cuda.empty_cache()
 
         for key, value in self.timing_raw.items():
-            logger.info(f"Curiosity timing - {key}: {value:.2f} seconds")
+            print(f"Curiosity timing - {key}: {value:.2f} seconds", flush=True)
 
         return result
