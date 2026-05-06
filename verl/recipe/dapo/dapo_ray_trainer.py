@@ -319,6 +319,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 kept_traj_idxs.append(idx)
 
                         new_batch = new_batch[kept_traj_idxs]
+                        new_batch.meta_info.pop("timing", None)
+                        if batch is not None:
+                            batch.meta_info.pop("timing", None)
                         batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
 
                         prompt_bsz = self.config.data.train_batch_size
