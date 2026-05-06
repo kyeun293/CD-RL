@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
-export CUDA_VISIBLE_DEVICES=2,3
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export RAY_TMPDIR="/home/yeeun/ray_tmp"
+export RAY_TMPDIR="/home/psunwoo/ray_tmp"
+export CUDA_VISIBLE_DEVICES=2,3,4,5
+export NCCL_SOCKET_NTHREADS=2
+export NCCL_NSOCKS_PERTHREAD=8
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export RAY_ADDRESS='http://127.0.0.1:8266'
 
-project_name='DAPO-Qwen2.5-3B-Instruct'
-exp_name='DAPO-Qwen2.5-3B-Instruct'
+
+
+project_name='CDRL-DAPO-Qwen2.5-3B-Instruct'
+exp_name='CDRL-DAPO-Qwen2.5-3B-Instruct-subset'
 
 adv_estimator=grpo
 
@@ -18,33 +24,35 @@ clip_ratio_high=0.28
 max_prompt_length=$((1024 * 2))
 max_response_length=$((1024 * 2))
 enable_overlong_buffer=True
-overlong_buffer_len=$((1024 * 1))
+overlong_buffer_len=$((256))
 overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
-enable_filter_groups=False
+enable_filter_groups=True
 filter_groups_metric=acc
-max_num_gen_batches=1
+max_num_gen_batches=0
 
 NNODES=1
+NGPUS_PER_NODE=4
 
-train_prompt_bsz=512
+train_prompt_bsz=64
 gen_prompt_bsz=$((train_prompt_bsz * 2))
-n_resp_per_prompt=4
-train_prompt_mini_bsz=128
+n_resp_per_prompt=6
+train_prompt_mini_bsz=16
 
 # Ray
 PWD=./
-RAY_ADDRESS=${RAY_ADDRESS:-"auto"}
-WORKING_DIR=${WORKING_DIR:-"/home/yeeun/CD-RL/verl"}
-RUNTIME_ENV=${RUNTIME_ENV:-"/home/yeeun/CD-RL/verl/recipe/dapo/runtime_env.yaml"}
+RAY_ADDRESS=${RAY_ADDRESS:-"http://127.0.0.1:8266"}
+WORKING_DIR=${WORKING_DIR:-"/home/psunwoo/workspace/CD-RL/verl"}
+RUNTIME_ENV=${RUNTIME_ENV:-"/home/psunwoo/workspace/CD-RL/verl/recipe/dapo/runtime_env.yaml"}
 
 # Paths
+DATA_HOME_PATH=${DATA_HOME_PATH:-"/mnt/sunwoo/data"}
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2.5-3B-Instruct"}
 PRM_MODEL_PATH=${PRM_MODEL_PATH:-"Qwen/Qwen2.5-Math-PRM-7B"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/dapo-math-17k.parquet"}
-TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/aime-2024.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"${DATA_HOME_PATH}/dapo-1.7k.parquet"}
+TEST_FILE=${TEST_FILE:-"${DATA_HOME_PATH}/aime-2024.parquet"}
 
 # Algorithm
 temperature=1.0
@@ -52,12 +60,22 @@ top_p=1.0
 top_k=-1  # 0 for HF rollout, -1 for vLLM rollout
 
 # Performance Related Parameter
-sp_size=2
+sp_size=1
 use_dynamic_bsz=True
-actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
-infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / sp_size))
-offload=True
-gen_tp=1
+actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
+infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
+offload=False
+gen_tp=2
+
+# curiosity 추가한 인자
+use_curiosity=True
+STEP_SEP="Step"
+icm_intermediate_size=8192
+icm_lr=1e-4
+icm_lr_scheduler_type="linear"
+icm_warmup_steps=10
+icm_intrinsic_reward_token="all_step_tokens" # "last_step_token" or "all_step_tokens"
+icm_eta=0.04
 
 ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
@@ -75,11 +93,20 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
+    algorithm.use_curiosity=${use_curiosity} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
     actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high} \
     actor_rollout_ref.actor.clip_ratio_c=10.0 \
+    actor_rollout_ref.step_sep=${STEP_SEP} \
+    actor_rollout_ref.prm_model_path="${PRM_MODEL_PATH}" \
+    actor_rollout_ref.icm.icm_intermediate_size=${icm_intermediate_size} \
+    actor_rollout_ref.icm.lr=${icm_lr} \
+    actor_rollout_ref.icm.lr_scheduler_type=${icm_lr_scheduler_type} \
+    actor_rollout_ref.icm.warmup_steps=${icm_warmup_steps} \
+    actor_rollout_ref.icm.intrinsic_reward_token=${icm_intrinsic_reward_token} \
+    actor_rollout_ref.icm.eta=${icm_eta} \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
     algorithm.filter_groups.metric=${filter_groups_metric} \
@@ -108,7 +135,7 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.80 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
@@ -129,21 +156,25 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
     reward.reward_kwargs.overlong_buffer_cfg.log=False \
     reward.reward_kwargs.max_resp_len=${max_response_length} \
-    reward.reward_kwargs.prm_model_path="${PRM_MODEL_PATH}" \
-    trainer.logger="['console']" \
+    actor_rollout_ref.prm_model_path="${PRM_MODEL_PATH}" \
+    trainer.logger="['console', 'wandb']" \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
-    trainer.n_gpus_per_node=${sp_size} \
+    trainer.n_gpus_per_node=${NGPUS_PER_NODE} \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
-    trainer.save_freq=20 \
+    trainer.save_freq=40 \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
+    trainer.save_curiosity_scores=True \
     actor_rollout_ref.actor.entropy_checkpointing=True \
     actor_rollout_ref.ref.entropy_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.forward_prefetch=True \
     actor_rollout_ref.ref.fsdp_config.forward_prefetch=True \
     actor_rollout_ref.actor.entropy_from_logits_with_chunking=True \
-    actor_rollout_ref.ref.entropy_from_logits_with_chunking=True
+    actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
+    +ray_kwargs.ray_init.include_dashboard=False \
+    +ray_kwargs.ray_init._temp_dir=${RAY_TMPDIR}
+
