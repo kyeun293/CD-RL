@@ -957,8 +957,19 @@ class RayPPOTrainer:
         # save dataloader
         local_mkdir_safe(local_global_step_folder)
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
-        dataloader_state_dict = self.train_dataloader.state_dict()
+        try:
+            dataloader_state_dict = self.train_dataloader.state_dict()
+        except StopIteration:
+            dataloader_state_dict = None  # 에포크 끝나서 이터레이터 소진된 경우
         torch.save(dataloader_state_dict, dataloader_local_path)
+
+        # ✅ ICM checkpoint 저장 추가
+        if self._use_curiosity:
+            icm_local_path = os.path.join(local_global_step_folder, "icm.pt")
+            icm_state = self.actor_rollout_wg.get_icm_state()
+            if icm_state is not None:  # rank 0만 반환
+                torch.save(icm_state, icm_local_path)
+                print(f"[ICM] Saved ICM checkpoint to {icm_local_path}", flush=True)
 
         # latest checkpointed iteration tracker (for atomic usage)
         if (
@@ -1042,6 +1053,16 @@ class RayPPOTrainer:
                 self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+
+        # ✅ ICM checkpoint 로드
+        if self._use_curiosity:
+            icm_local_path = os.path.join(global_step_folder, "icm.pt")
+            if os.path.exists(icm_local_path):
+                icm_state = torch.load(icm_local_path, map_location="cpu", weights_only=False)
+                self.actor_rollout_wg.load_icm_state(icm_state)
+                print(f"[ICM] Loaded ICM checkpoint from {icm_local_path}", flush=True)
+            else:
+                print(f"[ICM] No ICM checkpoint found at {icm_local_path}, starting fresh", flush=True)
 
     def _start_profiling(self, do_profile: bool) -> None:
         """Start profiling for all worker groups if profiling is enabled."""

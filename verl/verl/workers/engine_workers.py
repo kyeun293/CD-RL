@@ -814,6 +814,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         """
         return getattr(self.checkpoint_engine, method)(*args, **kwargs)
 
+    def get_icm_state(self):
+        if torch.distributed.get_rank() != 0:
+            return None
+        
+        return {
+            "icm": self.icm.state_dict(),
+            "icm_optimizer": self.icm_optimizer.state_dict(),
+            "icm_lr_scheduler": self.icm_lr_scheduler.state_dict(),
+        }
+
+    def load_icm_state(self, state):
+        if state is None:
+            return
+        self.icm.load_state_dict(state["icm"])
+        self.icm_optimizer.load_state_dict(state["icm_optimizer"])
+        self.icm_lr_scheduler.load_state_dict(state["icm_lr_scheduler"])
+
     def _find_sep_positions(self, token_ids, step_sep="Step"):
         """Return token indices whose decoded string ends with the step separator."""
         positions = []

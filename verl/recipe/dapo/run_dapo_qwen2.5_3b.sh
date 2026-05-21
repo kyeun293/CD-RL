@@ -4,10 +4,11 @@ source /home/soo/miniconda3/etc/profile.d/conda.sh
 conda activate verl
 
 # GPU 설정
-GPU_ID=0,1,6,7
+GPU_ID=2,3,4,5
 export CUDA_VISIBLE_DEVICES=$GPU_ID
 NNODES=1
 NGPUS_PER_NODE=4 # 학습용 gpu 수
+export VLLM_TORCH_COMPILE_LEVEL=0
 
 set -x
 export NCCL_DEBUG=INFO
@@ -18,8 +19,8 @@ cd $basepath
 export PYTHONPATH=$basepath:$PYTHONPATH
 
 # 기록
-project_name='DAPO'
-exp_name='DAPO-Qwen2.5-3B-Instruct'
+project_name='DAPO-Qwen2.5-3B-Instruct'
+exp_name='DAPO-Qwen2.5-3B-Instruct-prm-1024-subset'
 LOG_OUTPUT=/home/soo/yejin/CD-RL/verl/my_scripts/logs
 
 # ─── 시작 전 이전 잔여 프로세스 정리 ────────────────────────────────────────
@@ -76,11 +77,13 @@ train_prompt_mini_bsz=16          # 2 -> 8 (학습 단계 속도 향상)
 export RAY_TMPDIR=/dev/shm/yejin_ray_tmp
 mkdir -p $RAY_TMPDIR
 export VERL_ZMQ_DIR=/dev/shm
+export RAY_PORT=6380
+ray start --head --port=6380 --num-cpus=0 --num-gpus=0 --temp-dir=${RAY_TMPDIR}
 
 MODEL_PATH=${MODEL_PATH:-"${basepath}/models/Qwen2.5-3B-Instruct"}
 PRM_MODEL_PATH=${PRM_MODEL_PATH:-"${basepath}/models/Qwen2.5-Math-PRM-7B"}
 CKPTS_DIR=${CKPTS_DIR:-"${basepath}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${basepath}/data/dapo-math-1.7k.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"${basepath}/data/dapo-math-17k-0pct.parquet"}
 TEST_FILE=${TEST_FILE:-"${basepath}/data/aime-2024.parquet"}
 
 # Algorithm
@@ -93,8 +96,8 @@ val_top_p=0.7
 sp_size=1 # curiosity 계산에서 sequence parallel 구현하지 않음 -> sp_size=1로 고정
 gen_tp=2
 use_dynamic_bsz=True
-actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * n_resp_per_prompt))
-# (2048 + 4096) * 6 = 36864
+actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
+# (2048 + 4096) * 2 = 12288
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 # (2048 + 4096) * 2 = 12288
 offload=False
@@ -165,7 +168,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 2)) \
@@ -173,7 +176,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k="${top_k}" \
     actor_rollout_ref.rollout.val_kwargs.temperature=${temperature} \
-    actor_rollout_ref.rollout.val_kwargs.top_p=${val_top_p} \
+    actor_rollout_ref.rollout.val_kwargs.top_p=${top_p} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
@@ -193,7 +196,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     trainer.n_gpus_per_node=${NGPUS_PER_NODE} \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=True \
-    trainer.test_freq=40 \
+    trainer.test_freq=5 \
     trainer.save_freq=40 \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
