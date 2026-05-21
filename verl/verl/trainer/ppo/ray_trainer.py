@@ -961,7 +961,7 @@ class RayPPOTrainer:
             dataloader_state_dict = self.train_dataloader.state_dict()
         except StopIteration:
             dataloader_state_dict = None  # 에포크 끝나서 이터레이터 소진된 경우
-        torch.save(dataloader_state_dict, dataloader_local_path)
+        torch.save(dataloader_state_dict, dataloader_local_path) 
 
         # ✅ ICM checkpoint 저장 추가
         if self._use_curiosity:

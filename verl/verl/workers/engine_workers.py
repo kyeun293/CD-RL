@@ -817,7 +817,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def get_icm_state(self):
         if torch.distributed.get_rank() != 0:
             return None
-        
         return {
             "icm": self.icm.state_dict(),
             "icm_optimizer": self.icm_optimizer.state_dict(),
