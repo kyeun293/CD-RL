@@ -1,27 +1,36 @@
 #!/bin/bash
+#SBATCH --job-name=run_dapo_qwen2.5_3b
+#SBATCH --partition=a6000
+#SBATCH --nodelist=node02
+#SBATCH --gres=gpu:4
+#SBATCH --time=14-0:00:00
+#SBATCH --mem=20G
+#SBATCH --cpus-per-task=16
+#SBATCH --output=/home/yejin/data/projects/yejin/Curiosity/CD-RL/verl/my_scripts/logs/run_dapo_qwen2.5_3b.out
+
 # conda 환경 활성화
-source /home/soo/miniconda3/etc/profile.d/conda.sh
+ml purge
+ml load cuda/12.1
+eval "$(conda shell.bash hook)"
 conda activate verl
 
-# GPU 설정
-GPU_ID=2,3,4,5
-export CUDA_VISIBLE_DEVICES=$GPU_ID
+unset ROCR_VISIBLE_DEVICES
+
 NNODES=1
 NGPUS_PER_NODE=4 # 학습용 gpu 수
 export VLLM_TORCH_COMPILE_LEVEL=0
 
-set -x
 export NCCL_DEBUG=INFO
+export WANDB_INIT_TIMEOUT=300
 
 # current directory 이동
-basepath=/home/soo/yejin/CD-RL/verl
+basepath=/home/yejin/data/projects/yejin/Curiosity/CD-RL/verl
 cd $basepath
 export PYTHONPATH=$basepath:$PYTHONPATH
 
 # 기록
 project_name='DAPO-Qwen2.5-3B-Instruct'
 exp_name='DAPO-Qwen2.5-3B-Instruct-prm-1024-subset'
-LOG_OUTPUT=/home/soo/yejin/CD-RL/verl/my_scripts/logs
 
 # ─── 시작 전 이전 잔여 프로세스 정리 ────────────────────────────────────────
 echo "[cleanup] Killing any leftover Ray/DAPO processes..."
@@ -32,6 +41,8 @@ ray stop --force 2>/dev/null || true
 sleep 2
 rm -rf /dev/shm/${USER}_ray_tmp
 rm -rf /tmp/ray
+rm -f /tmp/ray_current_cluster
+unset RAY_ADDRESS
 echo "[cleanup] Done."
  
 # ─── 종료 시 자동 정리 (Ctrl+C / kill / 정상 종료 모두 처리) ─────────────────
@@ -78,7 +89,7 @@ export RAY_TMPDIR=/dev/shm/yejin_ray_tmp
 mkdir -p $RAY_TMPDIR
 export VERL_ZMQ_DIR=/dev/shm
 export RAY_PORT=6380
-ray start --head --port=6380 --num-cpus=0 --num-gpus=0 --temp-dir=${RAY_TMPDIR}
+# ray start --head --port=6380 --num-cpus=0 --num-gpus=0 --temp-dir=${RAY_TMPDIR}
 
 MODEL_PATH=${MODEL_PATH:-"${basepath}/models/Qwen2.5-3B-Instruct"}
 PRM_MODEL_PATH=${PRM_MODEL_PATH:-"${basepath}/models/Qwen2.5-Math-PRM-7B"}
@@ -197,7 +208,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
-    trainer.save_freq=5 \
+    trainer.save_freq=1 \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
@@ -209,5 +220,4 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.entropy_from_logits_with_chunking=True \
     actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
     +ray_kwargs.ray_init.include_dashboard=False \
-    +ray_kwargs.ray_init._temp_dir=${RAY_TMPDIR} \
-    2>&1 | tee "${LOG_OUTPUT}/${exp_name}.log"
+    +ray_kwargs.ray_init._temp_dir=${RAY_TMPDIR}

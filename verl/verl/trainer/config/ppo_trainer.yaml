@@ -60,6 +60,18 @@ actor_rollout_ref:
     # for huge model, layered summon can save memory (prevent OOM) but make it slower
     layered_summon: False
 
+  # Curiosity
+  step_sep: "Step"
+  prm_model_path: null
+
+  icm:
+    icm_intermediate_size: 8192
+    lr: 1e-4
+    lr_scheduler_type: linear
+    warmup_steps: 10
+    intrinsic_reward_token: all_step_tokens # "last_step_token" or "all_step_tokens"
+    eta: 0.04
+
 # config for the algorithm
 algorithm:
 
@@ -113,6 +125,9 @@ algorithm:
 
     # Power used for weight scaling in "pow" method
     weight_pow: 2.0
+
+  # Curiosity
+  use_curiosity: False
 
 # config for the trainer
 trainer:

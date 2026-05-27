@@ -77,6 +77,7 @@ def run_ppo(config, task_runner_class=None) -> None:
 
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
+        ray_init_kwargs["address"] = None  # 기존 클러스터 무시하고 새로 띄우기
         print(f"ray init kwargs: {ray_init_kwargs}", flush=True)
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
         print("Ray initialized successfully.", flush=True)

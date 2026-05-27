@@ -49,3 +49,4 @@ actor_rollout_ref:
 
 trainer:
   project_name: verl-dapo
+  save_curiosity_scores: False
