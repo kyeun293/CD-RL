@@ -967,6 +967,8 @@ class RayPPOTrainer:
         if self._use_curiosity:
             icm_local_path = os.path.join(local_global_step_folder, "icm.pt")
             icm_state = self.actor_rollout_wg.get_icm_state()
+            if isinstance(icm_state, list):
+                icm_state = next((s for s in icm_state if s is not None), None)
             if icm_state is not None:  # rank 0만 반환
                 torch.save(icm_state, icm_local_path)
                 print(f"[ICM] Saved ICM checkpoint to {icm_local_path}", flush=True)

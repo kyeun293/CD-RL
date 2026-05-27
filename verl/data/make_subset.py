@@ -53,17 +53,20 @@ def main():
     parser.add_argument("--repeat", type=int, default=10, help="[repeat] rows per unique problem")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--input", type=str, default="/home/soo/yejin/CD-RL/verl/data/dapo-math-17k.parquet")
-    parser.add_argument("--output", type=str, default=None)
+    parser.add_argument("--output_dir", type=str, default=None)
     args = parser.parse_args()
 
-    if args.output is None:
+    if args.output_dir is None:
         output_dir = "/home/soo/yejin/CD-RL/verl/data"
-        input_basename = os.path.basename(args.input)
-        if args.mode == "sample":
-            filename = input_basename.replace(".parquet", f"-{int(args.frac*100)}pct.parquet")
-        else:
-            filename = input_basename.replace(".parquet", f"-all-{args.repeat}x.parquet")
-        args.output = os.path.join(output_dir, filename)
+    else:
+        output_dir = args.output_dir
+    
+    input_basename = os.path.basename(args.input)
+    if args.mode == "sample":
+        filename = input_basename.replace(".parquet", f"-{int(args.frac*100)}pct.parquet")
+    else:
+        filename = input_basename.replace(".parquet", f"-all-{args.repeat}x.parquet")
+    args.output = os.path.join(output_dir, filename)
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
     print(f"Loading {args.input} ...")
