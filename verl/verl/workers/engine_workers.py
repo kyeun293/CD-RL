@@ -818,8 +818,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     def get_icm_state(self):
         if torch.distributed.get_rank() != 0:
             return None
-        # optimizer state도 CPU로 이동
-        opt_state = self.icm_optimizer.state_dict()
+        
+        import copy
+        # optimizer state_dict는 copy해서 작업 (원본 건드리지 않게)
+        opt_state = copy.deepcopy(self.icm_optimizer.state_dict())
         for state in opt_state["state"].values():
             for k, v in state.items():
                 if isinstance(v, torch.Tensor):
@@ -1108,21 +1110,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.icm_optimizer.zero_grad()
         icm_loss.backward()
 
-        for name, param in self.icm.named_parameters():
-            if param.grad is not None:
-                print(f"BEFORE allreduce - {name}: param={param.device}, grad={param.grad.device}")
-
-
         device = next(self.icm.parameters()).device
         for param in self.icm.parameters():
             if param.grad is not None:
                 # param.grad = param.grad.to(device)  # gradient를 GPU로 강제
                 torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG)
-
-
-        for name, param in self.icm.named_parameters():
-            if param.grad is not None:
-                print(f"AFTER allreduce - {name}: param={param.device}, grad={param.grad.device}")
         
         self.icm_optimizer.step()
 

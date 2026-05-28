@@ -4,7 +4,7 @@ source /home/soo/miniconda3/etc/profile.d/conda.sh
 conda activate verl
 
 # GPU 설정
-GPU_ID=2,3,4,5
+GPU_ID=4,5,6,7
 export CUDA_VISIBLE_DEVICES=$GPU_ID
 NNODES=1
 NGPUS_PER_NODE=4 # 학습용 gpu 수
@@ -20,7 +20,7 @@ export PYTHONPATH=$basepath:$PYTHONPATH
 
 # 기록
 project_name='DAPO-Qwen2.5-3B-Instruct'
-exp_name='DAPO-Qwen2.5-3B-Instruct-prm-1024-subset'
+exp_name='DAPO-Qwen2.5-3B-Instruct-subset'
 LOG_OUTPUT=/home/soo/yejin/CD-RL/verl/my_scripts/logs
 
 # ─── 시작 전 이전 잔여 프로세스 정리 ────────────────────────────────────────
@@ -74,7 +74,7 @@ train_prompt_mini_bsz=16          # 2 -> 8 (학습 단계 속도 향상)
 
 # Paths
 # Ray
-export RAY_TMPDIR=/dev/shm/yejin_ray_tmp
+export RAY_TMPDIR=/dev/shm/${USER}_ray_tmp
 mkdir -p $RAY_TMPDIR
 export VERL_ZMQ_DIR=/dev/shm
 export RAY_PORT=6380
@@ -101,6 +101,7 @@ actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 # (2048 + 4096) * 2 = 12288
 offload=False
+gpu_memory_utilization=0.5
 
 # 추가한 인자
 use_curiosity=True
@@ -168,7 +169,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=${gpu_memory_utilization} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 2)) \
@@ -197,7 +198,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
-    trainer.save_freq=5 \
+    trainer.save_freq=1 \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
