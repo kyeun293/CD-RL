@@ -2,16 +2,16 @@
 set -xeuo pipefail
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export RAY_TMPDIR="/home/psunwoo/ray_tmp"
-export CUDA_VISIBLE_DEVICES=2,3,4,5
+export CUDA_VISIBLE_DEVICES=1,2,3,5
 export NCCL_SOCKET_NTHREADS=2
 export NCCL_NSOCKS_PERTHREAD=8
 export CUDA_DEVICE_MAX_CONNECTIONS=1
-export RAY_ADDRESS='http://127.0.0.1:8266'
+export RAY_ADDRESS='http://127.0.0.1:8267'
 
 
 
 project_name='CDRL-DAPO-Qwen2.5-3B-Instruct'
-exp_name='CDRL-DAPO-Qwen2.5-3B-Instruct-subset'
+exp_name='CDRL-DAPO-Qwen2.5-3B-Instruct-1.7k_subset-eta10'
 
 adv_estimator=grpo
 
@@ -41,7 +41,7 @@ train_prompt_mini_bsz=16
 
 # Ray
 PWD=./
-RAY_ADDRESS=${RAY_ADDRESS:-"http://127.0.0.1:8266"}
+RAY_ADDRESS=${RAY_ADDRESS:-"http://127.0.0.1:8267"}
 WORKING_DIR=${WORKING_DIR:-"/home/psunwoo/workspace/CD-RL/verl"}
 RUNTIME_ENV=${RUNTIME_ENV:-"/home/psunwoo/workspace/CD-RL/verl/recipe/dapo/runtime_env.yaml"}
 
@@ -74,8 +74,8 @@ icm_intermediate_size=8192
 icm_lr=1e-4
 icm_lr_scheduler_type="linear"
 icm_warmup_steps=10
-icm_intrinsic_reward_token="all_step_tokens" # "last_step_token" or "all_step_tokens"
-icm_eta=0.04
+icm_intrinsic_reward_token="last_step_token" # "last_step_token" or "all_step_tokens"
+icm_eta=10
 
 ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
@@ -167,7 +167,8 @@ ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     trainer.save_freq=40 \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
-    trainer.resume_mode=auto \
+    trainer.resume_mode=disable \
+    trainer.resume_from_path="/home/psunwoo/verl/ckpts/CDRL-DAPO-Qwen2.5-3B-Instruct/CDRL-DAPO-Qwen2.5-3B-Instruct-1.7k_subset/global_step_681" \
     trainer.save_curiosity_scores=True \
     actor_rollout_ref.actor.entropy_checkpointing=True \
     actor_rollout_ref.ref.entropy_checkpointing=True \

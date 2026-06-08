@@ -121,8 +121,12 @@ class RayDAPOTrainer(RayPPOTrainer):
 
             if self.config.actor_rollout_ref.icm.intrinsic_reward_token == "all_step_tokens":
                 batch.batch["token_level_rewards"][data_idx, start:end] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward_flat[k].item() * prm_label
+
             elif self.config.actor_rollout_ref.icm.intrinsic_reward_token == "last_step_token":
-                batch.batch["token_level_rewards"][data_idx, end - 1] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward_flat[k].item() * prm_label
+                # 수정: 스텝 수로 나누어 inrinsic reward 정규화
+                step_num = len(prm_labels)
+                if step_num > 0:
+                    batch.batch["token_level_rewards"][data_idx, end - 1] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward_flat[k].item() * prm_label / step_num
 
         return batch
 
@@ -167,6 +171,7 @@ class RayDAPOTrainer(RayPPOTrainer):
             rollout_skip.wrap_generate_sequences()
 
         # add tqdm
+        
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
         # we start from step 1

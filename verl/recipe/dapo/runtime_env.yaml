@@ -3,6 +3,7 @@ excludes: ["/.git/"]
 env_vars:
   TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
   VLLM_USE_V1: "1"
-  PATH: "/home/yeeun/miniconda3/envs/yeeun_cd/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-  CUDA_VISIBLE_DEVICES: "2,3"
+  PATH: "/home/psunwoo/miniconda3/envs/cdrl/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  CUDA_VISIBLE_DEVICES: "1,2,3,5"
   RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES: "1"
+  VERL_ZMQ_DIR: "/home/psunwoo/ray_tmp/zmq"
