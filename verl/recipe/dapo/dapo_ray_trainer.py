@@ -43,6 +43,7 @@ from verl.utils.checkpoint.checkpoint_manager import should_save_ckpt_esi
 from verl.utils.metric import reduce_metrics
 from verl.utils.profiler import marked_timer
 from verl.utils.rollout_skip import RolloutSkip
+import wandb
 
 class RayDAPOTrainer(RayPPOTrainer):
     """
@@ -53,8 +54,10 @@ class RayDAPOTrainer(RayPPOTrainer):
         reward_kwargs = OmegaConf.to_container(self.config.reward.reward_kwargs, resolve=True)
         self._use_curiosity = self.config.algorithm.get("use_curiosity", False)
         self._step_sep = self.config.actor_rollout_ref.get("step_sep", None)
+        self.save_curiosity_scores = self.config.trainer.get("save_curiosity_scores", False)
         print(f"[INIT-DEBUG] use_curiosity: {self._use_curiosity}", flush=True)
         print(f"[INIT-DEBUG] step_sep: {repr(self._step_sep)}", flush=True)
+        print(f"[INIT-DEBUG] save_curiosity_scores: {self.save_curiosity_scores}", flush=True)
 
     def compute_kl_related_metrics(self, batch: DataProto, metrics: dict, timing_raw: dict):
         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -118,8 +121,12 @@ class RayDAPOTrainer(RayPPOTrainer):
 
             if self.config.actor_rollout_ref.icm.intrinsic_reward_token == "all_step_tokens":
                 batch.batch["token_level_rewards"][data_idx, start:end] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward_flat[k].item() * prm_label
+
             elif self.config.actor_rollout_ref.icm.intrinsic_reward_token == "last_step_token":
-                batch.batch["token_level_rewards"][data_idx, end - 1] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward_flat[k].item() * prm_label
+                # 수정: 스텝 수로 나누어 inrinsic reward 정규화
+                step_num = len(prm_labels)
+                if step_num > 0:
+                    batch.batch["token_level_rewards"][data_idx, end - 1] += self.config.actor_rollout_ref.icm.eta * intrinsic_reward_flat[k].item() * prm_label / step_num
 
         return batch
 
@@ -164,6 +171,7 @@ class RayDAPOTrainer(RayPPOTrainer):
             rollout_skip.wrap_generate_sequences()
 
         # add tqdm
+        
         progress_bar = tqdm(total=self.total_training_steps, initial=self.global_steps, desc="Training Progress")
 
         # we start from step 1
@@ -358,6 +366,39 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                         batch.batch["ref_log_prob"] = curiosity_result.batch["ref_log_prob"]
                         metrics["train/icm_loss"] = curiosity_result.non_tensor_batch["icm_loss"].mean().item()
+
+                        # save curiosity scores for analysis
+                        if self.save_curiosity_scores:
+                            rows = []
+                            for i in range(batch_size):
+                                uid = batch.non_tensor_batch["uid"][i]
+                                global_idx = batch.non_tensor_batch["global_indices"][i]
+                                parsed_steps = curiosity_result.non_tensor_batch["parsed_steps"][i]
+                                rewards = curiosity_result.non_tensor_batch["intrinsic_reward"][i]  # array of floats
+                                prm_labels = curiosity_result.non_tensor_batch["prm_labels"][i]     # array of ints
+                                pair_map = curiosity_result.non_tensor_batch["pair_map"][i]         # list of (data_idx, step_idx)
+                                step_boundaries = curiosity_result.non_tensor_batch["step_boundaries"][i]  # list of ints
+
+                                # print(f"[DEBUG] i={i} parsed_steps len={len(parsed_steps)} rewards len={len(rewards)}", flush=True)
+                                # print(f"[DEBUG] i={i} parsed_steps[0]={repr(parsed_steps[0]) if len(parsed_steps) > 0 else 'EMPTY'}", flush=True)
+
+                                for step_idx, (step_text, reward, prm_label, (data_idx, s_idx)) in enumerate(zip(parsed_steps, rewards, prm_labels, pair_map)):
+                                    rows.append([
+                                        uid,
+                                        int(global_idx),
+                                        step_idx,
+                                        step_text,
+                                        float(reward),
+                                        int(prm_label),
+                                        int(step_boundaries[step_idx]),   # step 시작 토큰 위치
+                                        int(step_boundaries[step_idx + 1]) # step 끝 토큰 위치
+                                    ])
+                                
+                            table = wandb.Table(
+                                columns=["uid", "global_index", "step_idx", "step_text", "curiosity_score", "prm_label", "step_start", "step_end"],
+                                data=rows
+                            )
+                            wandb.log({"curiosity/scores": table}, step=self.global_steps)
 
                         # intrinsic reward을 token_level_rewards에 더하기
                         # check_tensor = batch.batch["token_level_rewards"][0]

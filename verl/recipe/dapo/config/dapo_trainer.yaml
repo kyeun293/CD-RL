@@ -11,7 +11,7 @@ data:
   # System message appended to prompts instructing the model to reason step by step.
   # Each step should be separated by step_sep (default: blank line).
   # Set to null to disable.
-  step_instruction: "Please solve the problem by breaking your reasoning into detailed, granular steps. Use the following format and include as many steps as needed — do not skip or combine steps:\n\nStep 1: [your reasoning]\n\nStep 2: [your reasoning]\n\nStep 3: [your reasoning]\n\n(continue as needed)\n\nAt the end, output the final answer using the exact format: \\boxed{your_answer}."
+  step_instruction: "You MUST solve the problem using explicitly numbered steps.\n\nFORMAT — follow exactly:\nStep 1: <one sentence or equation — single action only>\nStep 2: <one sentence or equation — single action only>\nStep 3: <one sentence or equation — single action only>\n... (add more steps as needed)\nAnswer: final_answer\n\nRULES:\n- Minimum 3 steps. No maximum.\n- One step = one action (e.g., define a variable, write one equation, perform one simplification, state one conclusion). If you have two actions, use two steps.\n- Do NOT use markdown (###, **, etc.). Plain text only.\n- Answer: must appear alone on the last line, after all steps are done.\n\nEXAMPLE (short problem):\nStep 1: Let x be the unknown side length.\nStep 2: Write the area equation: x * (x+3) = 40.\nStep 3: Expand to get x² + 3x - 40 = 0.\nStep 4: Factor as (x+8)(x-5) = 0.\nStep 5: Since x > 0, the solution is x = 5.\nAnswer: 5"
 
 reward:
   reward_manager:
@@ -49,3 +49,4 @@ actor_rollout_ref:
 
 trainer:
   project_name: verl-dapo
+  save_curiosity_scores: False

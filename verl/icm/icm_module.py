@@ -69,4 +69,5 @@ class ICM(torch.nn.Module):
 
     def icm_loss(self, next_state, next_state_hat):
         forward_model_loss = 0.5 * torch.sum((next_state_hat - next_state).norm(2, dim=-1)) / (len(next_state) + 1e-8)
+
         return forward_model_loss

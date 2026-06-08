@@ -677,7 +677,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # 모델 생성 및 설정
             # .cuda() 대신 .to(self.device)를 사용하여 Ray 할당 자원 준수
-            self.icm = ICM(hidden_size, intermediate_size).to(dtype=torch.bfloat16, device=self.device)
+            self.icm = ICM(hidden_size, intermediate_size).to(dtype=torch.float32, device=self.device)
             
             self.icm_optimizer = torch.optim.Adam(
                 self.icm.parameters(),
@@ -813,6 +813,48 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         """
         return getattr(self.checkpoint_engine, method)(*args, **kwargs)
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    # 수정: icm state 저장 및 로드
+    def get_icm_state(self):
+        if torch.distributed.get_rank() != 0:
+            return None
+        
+        import copy
+        # optimizer state_dict는 copy해서 작업 (원본 건드리지 않게)
+        opt_state = copy.deepcopy(self.icm_optimizer.state_dict())
+        for state in opt_state["state"].values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.cpu()
+        return {
+            "icm":{k: v.cpu() for k, v in self.icm.state_dict().items()},
+            "icm_optimizer": opt_state,
+            "icm_lr_scheduler": self.icm_lr_scheduler.state_dict(),
+        }
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def load_icm_state(self, state):
+        if state is None:
+            return
+        import copy
+        state = copy.deepcopy(state)
+
+        # 명시적으로 현재 워커의 GPU device 사용
+        target_device = torch.device(f"cuda:{torch.cuda.current_device()}")
+
+        # ICM 모델 GPU로
+        self.icm.load_state_dict({k: v.to(target_device) for k, v in state["icm"].items()})
+        
+        # optimizer state GPU로
+        self.icm_optimizer.load_state_dict(state["icm_optimizer"])  # 먼저 로드한 후 텐서를 GPU로 이동
+        for s in self.icm_optimizer.state.values():
+            for k, v in s.items():
+                if isinstance(v, torch.Tensor):
+                    s[k] = v.to(target_device)
+        self.icm_lr_scheduler.load_state_dict(state["icm_lr_scheduler"])
+
+
 
     def _find_sep_positions(self, token_ids, step_sep="Step"):
         """Return token indices whose decoded string ends with the step separator."""
@@ -1072,9 +1114,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         s_t_batch, a_t_batch, s_t1_batch, pair_map = self.icm.prepare_icm_input(
             ref_hidden_states, actor_hidden_states
         )
-        s_t_batch = s_t_batch.to(torch.bfloat16).cuda()
-        a_t_batch = a_t_batch.to(torch.bfloat16).cuda()
-        s_t1_batch = s_t1_batch.to(torch.bfloat16).cuda()
+        device = next(self.icm.parameters()).device
+        s_t_batch = s_t_batch.to(device=device, dtype=torch.float32)
+        a_t_batch = a_t_batch.to(device=device, dtype=torch.float32)
+        s_t1_batch = s_t1_batch.to(device=device, dtype=torch.float32)
 
         next_state, next_state_hat = self.icm(s_t_batch, s_t1_batch, a_t_batch)
 
@@ -1082,10 +1125,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         self.icm_optimizer.zero_grad()
         icm_loss.backward()
-        # 워커 간 gradient 동기화 추가
+        
+        for name, param in self.icm.named_parameters():
+            if param.grad is not None:
+                print(f"BEFORE allreduce - {name}: param={param.device}, grad={param.grad.device}")
+
+
+        device = next(self.icm.parameters()).device
         for param in self.icm.parameters():
             if param.grad is not None:
+                # param.grad = param.grad.to(device)  # gradient를 GPU로 강제
                 torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG)
+
+
+        for name, param in self.icm.named_parameters():
+            if param.grad is not None:
+                print(f"AFTER allreduce - {name}: param={param.device}, grad={param.grad.device}")
         self.icm_optimizer.step()
         self.icm_lr_scheduler.step()
 
@@ -1096,6 +1151,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         mean = intrinsic_reward.mean()
         var = intrinsic_reward.var(unbiased=False)
         intrinsic_reward = (intrinsic_reward - mean) * torch.rsqrt(var + 1e-8)
+        # 수정: sigmoid로 intrinsic reward range 0~1
+        intrinsic_reward = torch.sigmoid(intrinsic_reward)
         intrinsic_reward = intrinsic_reward.detach().cpu()
 
         del next_state, next_state_hat
@@ -1180,6 +1237,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 "pair_map": np.array(pair_map_per_sample, dtype=object),
                 "step_boundaries": step_boundaries,
                 "icm_loss": np.array([icm_loss_val] * batch_size, dtype=np.float32),
+                "parsed_steps": batch.non_tensor_batch["parsed_steps"],
             }
         )
 
@@ -1190,6 +1248,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         torch.cuda.empty_cache()
 
         for key, value in self.timing_raw.items():
-            logger.info(f"Curiosity timing - {key}: {value:.2f} seconds")
+            print(f"Curiosity timing - {key}: {value:.2f} seconds", flush=True)
 
         return result
