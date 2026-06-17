@@ -348,7 +348,9 @@ class RewardLoopManager:
         else:
             prompt_length = data.batch["prompts"].size(1)
             valid_response_length = data.batch["attention_mask"][:, prompt_length:].sum(dim=1)
+            #SOO: 모든 리워드 0으로 리셋
             rm_scores = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
+            # 정답 나오면 마지막 토큰 리워드 1로 설정
             rm_scores[torch.arange(rm_scores.size(0)), valid_response_length - 1] = torch.tensor(
                 scores, dtype=torch.float32
             )

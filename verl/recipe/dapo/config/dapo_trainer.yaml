@@ -30,10 +30,12 @@ algorithm:
     enable: False # We try to avoid forgetting to set enable
     metric: null # acc / score / seq_reward / seq_final_reward / ...
     max_num_gen_batches: 0 # Non-positive values mean no upper limit
-  use_curiosity: False
+  use_curiosity: True
+  use_tokenlevel_curiosity: False  #SOO: token level ICM
 
 actor_rollout_ref:
   use_curiosity: ${algorithm.use_curiosity}
+  use_tokenlevel_curiosity: ${algorithm.use_tokenlevel_curiosity}  #SOO: token level ICM
   step_sep: null # e.g. "Step"
   prm_model_path: null
   total_training_steps: null
@@ -45,7 +47,15 @@ actor_rollout_ref:
     lr_scheduler_type: "linear"
     warmup_steps: 0
     intrinsic_reward_token: "all_step_tokens" # "last_step_token" or "all_step_tokens"
-    eta: 0.01
+    icm_calculation: "normalize" # "clip" or "normalize"
+    eta: 0.5
+    prm_mask: True  #SOO: PRM Modification
+  tokenlevel_icm:  #SOO: token level ICM
+    icm_intermediate_size: 8192
+    lr: 1e-4
+    lr_scheduler_type: "linear"
+    warmup_steps: 0
+    eta_token: 0.01
 
 trainer:
   project_name: verl-dapo

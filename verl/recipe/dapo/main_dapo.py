@@ -74,7 +74,7 @@ class DAPOTaskRunner(TaskRunner):
             tokenizer,
             processor,
             is_train=True,
-            max_samples=config.data.get("train_max_samples", -1),
+            max_samples=config.data.get("train_max_samples", 128),  # SOO: Only use 128 samples for training for debugging purpose
         )
         val_dataset = create_rl_dataset(
             config.data.val_files,
@@ -90,7 +90,7 @@ class DAPOTaskRunner(TaskRunner):
         from .dapo_ray_trainer import RayDAPOTrainer
 
         trainer = RayDAPOTrainer(
-            config=config,
+            config=config,  ## SOO: ICL
             tokenizer=tokenizer,
             processor=processor,
             role_worker_mapping=self.role_worker_mapping,

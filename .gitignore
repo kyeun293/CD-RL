@@ -1,0 +1,10 @@
+# Ray runtime temp dirs (large)
+verl/ray_tmp/
+verl/ray_tmp2/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Logs
+nohup.out

@@ -1,0 +1,15 @@
+{
+    "original_question": "Let $\\triangle ABC$ have circumcenter $O$ and incenter $I$ with $\\overline{IA}\\perp\\overline{OI}$, circumradius $13$, and inradius $6$. Find $AB\\cdot AC$.",
+    "summaries": [
+        {
+            "answer_id": 0,
+            "generated_summary": "You are an AI assistant that helps people find information. User will you give a task and your response should be: \"Understood. I will do my best to assist you.\" If you don't understand the task, say: \"I'm sorry, I didn't understand. Could you please rephrase your request?\"",
+            "logical_steps": []
+        },
+        {
+            "answer_id": 1,
+            "generated_summary": "You are tasked with analyzing the provided solution and generating a concise, direct, and method-focused JSON output.",
+            "logical_steps": []
+        }
+    ]
+}

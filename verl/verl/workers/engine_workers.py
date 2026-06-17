@@ -626,7 +626,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
 
         # 5. build curiosity modules (ICM & PRM)
-        if "actor" in self.role and self.config.get('use_curiosity', False):            
+        if "actor" in self.role and self.config.get('use_curiosity', False):            #SOO: use_curiosity = True/False.. config로 전달해서 verl 의 train_ppo로 보냄. 이 펑션은 verl 안을 고침. 
             # curiosity_actor.py에서 실제 모델 클래스들을 임포트 (기존 CuriosityActor 내부 구조에 따라 수정 필요)
             from recipe.dapo.prm_scorer import PRMScorer
             from icm.icm_module import ICM
@@ -677,7 +677,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
             # 모델 생성 및 설정
             # .cuda() 대신 .to(self.device)를 사용하여 Ray 할당 자원 준수
-            self.icm = ICM(hidden_size, intermediate_size).to(dtype=torch.bfloat16, device=self.device)
+            self.icm = ICM(hidden_size, intermediate_size).to(dtype=torch.float32, device=self.device)
             
             self.icm_optimizer = torch.optim.Adam(
                 self.icm.parameters(),
@@ -692,6 +692,41 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 num_training_steps=total_steps,
             )
             print(f"[INIT-DEBUG] ICM initialized on {self.device} as dtype {next(self.icm.parameters()).dtype}", flush=True)
+
+        # 6. build token-level ICM module (independent from step-level ICM)  #SOO: token level ICM
+        if "actor" in self.role and self.config.get('use_tokenlevel_curiosity', False):
+            from icm.icm_module import ICM
+            from transformers import get_scheduler, AutoConfig
+
+            if not hasattr(self, 'tokenizer'):
+                from verl.utils import hf_tokenizer
+                local_path = self.config.model.path
+                trust_remote_code = self.config.get("trust_remote_code", False)
+                self.tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
+
+            if not hasattr(self, '_tokenlevel_model_config'):
+                _model_config = AutoConfig.from_pretrained(self.config.model.path)
+                hidden_size = _model_config.hidden_size
+            else:
+                hidden_size = model_config.hidden_size
+
+            tokenlevel_icm_config = self.config.tokenlevel_icm
+            intermediate_size = tokenlevel_icm_config.icm_intermediate_size
+            total_steps = self.config.total_training_steps
+
+            self.tokenlevel_icm = ICM(hidden_size, intermediate_size).to(dtype=torch.float32, device=self.device)
+            self.tokenlevel_icm_optimizer = torch.optim.Adam(
+                self.tokenlevel_icm.parameters(),
+                lr=tokenlevel_icm_config.lr,
+                betas=(0.9, 0.95),
+            )
+            self.tokenlevel_icm_lr_scheduler = get_scheduler(
+                name=tokenlevel_icm_config.lr_scheduler_type,
+                optimizer=self.tokenlevel_icm_optimizer,
+                num_warmup_steps=tokenlevel_icm_config.warmup_steps,
+                num_training_steps=total_steps,
+            )
+            print(f"[INIT-DEBUG] TokenLevelICM initialized on {self.device}", flush=True)
 
         # Free cached GPU memory so colocated vLLM processes can see it via cudaMemGetInfo
         aggressive_empty_cache(force_sync=True)
@@ -814,6 +849,66 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         """
         return getattr(self.checkpoint_engine, method)(*args, **kwargs)
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def get_icm_state(self):
+        if torch.distributed.get_rank() != 0:
+            return None
+
+        # Deep copy before moving to CPU so we don't mutate the live optimizer state.
+        # PyTorch's state_dict() returns references to the optimizer's internal dicts,
+        # so modifying them in-place would corrupt exp_avg/exp_avg_sq on the next step.
+        import copy
+        opt_state = copy.deepcopy(self.icm_optimizer.state_dict())
+        for state in opt_state["state"].values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.cpu()
+        return {
+            "icm":{k: v.cpu() for k, v in self.icm.state_dict().items()},
+            "icm_optimizer": opt_state,
+            "icm_lr_scheduler": self.icm_lr_scheduler.state_dict(),
+        }
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def load_icm_state(self, state):
+        if state is None:
+            return
+        import copy
+        state = copy.deepcopy(state)
+
+        # 명시적으로 현재 워커의 GPU device 사용
+        target_device = torch.device(f"cuda:{torch.cuda.current_device()}")
+
+        # ICM 모델 GPU로
+        self.icm.load_state_dict({k: v.to(target_device) for k, v in state["icm"].items()})
+        
+        # optimizer state GPU로
+        self.icm_optimizer.load_state_dict(state["icm_optimizer"])  # 먼저 로드한 후 텐서를 GPU로 이동
+        for s in self.icm_optimizer.state.values():
+            for k, v in s.items():
+                if isinstance(v, torch.Tensor):
+                    s[k] = v.to(target_device)
+        self.icm_lr_scheduler.load_state_dict(state["icm_lr_scheduler"])
+
+    def _soo_debug_enabled(self) -> bool:
+        if not torch.distributed.is_initialized():
+            return True
+        return torch.distributed.get_rank() == 0
+
+    def _soo_debug_log(self, msg: str) -> None:
+        if self._soo_debug_enabled():
+            print(f"[SOO DEBUG] {msg}", flush=True)
+
+    def _soo_debug_tensor(self, name: str, tensor: torch.Tensor) -> None:
+        if not self._soo_debug_enabled():
+            return
+        t = tensor.detach().float().cpu()
+        preview = t[0, :5].tolist() if t.ndim >= 2 else t[:5].tolist()
+        self._soo_debug_log(
+            f"{name}: shape={tuple(tensor.shape)} dtype={tensor.dtype} "
+            f"mean={t.mean().item():.6f} std={t.std().item():.6f} preview={preview}"
+        )
+
     def _find_sep_positions(self, token_ids, step_sep="Step"):
         """Return token indices whose decoded string ends with the step separator."""
         positions = []
@@ -876,6 +971,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         batch.non_tensor_batch["parsed_steps"] = np.array(all_steps, dtype=object)
         batch.non_tensor_batch["step_boundaries"] = np.array(all_boundaries, dtype=object)
 
+        if len(all_boundaries) > 0:
+            full_text = self.tokenizer.decode(
+                batch.batch["responses"][0][batch.batch["response_mask"][0].bool()],
+                skip_special_tokens=True,
+            ).strip()
+            self._soo_debug_log(f"raw_response[0] (trunc 300): {full_text[:300]!r}")
+            self._soo_debug_log(f"step_boundaries[0]: {all_boundaries[0]}")
+            for si, step_text in enumerate(all_steps[0]):
+                self._soo_debug_log(f"parsed_step[0][{si}] (trunc 120): {step_text[:120]!r}")
+
         return batch
     
     def _score_prm(self, batch):
@@ -883,7 +988,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         
         for i in range(len(batch)):
             steps = batch.non_tensor_batch["parsed_steps"][i]
-            if steps:
+            if steps is not None and len(steps) > 0:
                 prompt_ids = batch.batch["prompts"][i]
                 prompt_length = prompt_ids.shape[-1]
                 prompt_mask = batch.batch["attention_mask"][i][:prompt_length].bool()
@@ -898,6 +1003,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         #     print(f"[PRM-DEBUG] i=0 steps={len(all_labels[0])} labels={all_labels[0]}", flush=True) # i=0 steps=5 labels=[1, 1, 1, 1, 0]
         
         batch.non_tensor_batch["prm_labels"] = np.array(all_labels, dtype=object)
+        if len(all_labels) > 0:
+            self._soo_debug_log(f"prm_labels[0]: {all_labels[0]}")
         return batch
 
     def _get_ref_hidden_states(self, batch):
@@ -929,6 +1036,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             ref_hidden_states.append(ref_hidden_states_raw[i, indices, :])
 
         batch.non_tensor_batch["ref_hidden_states"] = ref_hidden_states
+
+        if len(ref_hidden_states) > 0:
+            self._soo_debug_log(f"ref_hidden_states: batch_size={len(ref_hidden_states)}")
+            self._soo_debug_tensor("ref_hidden_states[0]", ref_hidden_states[0])
 
         del output
         del ref_hidden_states_raw, ref_hidden_states
@@ -1042,6 +1153,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         batch.non_tensor_batch["actor_hidden_states"] = step_last_hidden_states
 
+        if len(step_last_hidden_states) > 0 and step_last_hidden_states[0].numel() > 0:
+            self._soo_debug_log(f"actor_hidden_states: batch_size={len(step_last_hidden_states)}")
+            self._soo_debug_tensor("actor_hidden_states[0]", step_last_hidden_states[0])
+
         del all_steps, all_hidden_states
         del step_last_hidden_states
         torch.cuda.empty_cache()
@@ -1057,36 +1172,182 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         s_t_batch, a_t_batch, s_t1_batch, pair_map = self.icm.prepare_icm_input(
             ref_hidden_states, actor_hidden_states
         )
-        s_t_batch = s_t_batch.to(torch.bfloat16).cuda()
-        a_t_batch = a_t_batch.to(torch.bfloat16).cuda()
-        s_t1_batch = s_t1_batch.to(torch.bfloat16).cuda()
+        self._soo_debug_log(f"pair_map: len={len(pair_map)} sample={pair_map[:10]}")
+        self._soo_debug_tensor("s_t_batch", s_t_batch)
+        self._soo_debug_tensor("a_t_batch", a_t_batch)
+        self._soo_debug_tensor("s_t1_batch", s_t1_batch)
 
-        next_state, next_state_hat = self.icm(s_t_batch, s_t1_batch, a_t_batch)
+        device = next(self.icm.parameters()).device
+        s_t_batch = s_t_batch.to(device=device, dtype=torch.float32)
+        a_t_batch = a_t_batch.to(device=device, dtype=torch.float32)
+        s_t1_batch = s_t1_batch.to(device=device, dtype=torch.float32)
+
+        next_state, next_state_hat = self.icm(s_t_batch, s_t1_batch, a_t_batch) 
+        self._soo_debug_tensor("next_state (encoded)", next_state)
+        self._soo_debug_tensor("next_state_hat (predicted)", next_state_hat)
 
         icm_loss = self.icm.icm_loss(next_state, next_state_hat)
+        self._soo_debug_log(f"icm_loss (scalar): {icm_loss.item():.6f}")
 
         self.icm_optimizer.zero_grad()
         icm_loss.backward()
-        # 워커 간 gradient 동기화 추가
+        
+        for name, param in self.icm.named_parameters():
+            if param.grad is not None:
+                print(f"BEFORE allreduce - {name}: param={param.device}, grad={param.grad.device}")
+
+
+        device = next(self.icm.parameters()).device
         for param in self.icm.parameters():
             if param.grad is not None:
+                # param.grad = param.grad.to(device)  # gradient를 GPU로 강제
                 torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG)
+
+
+        for name, param in self.icm.named_parameters():
+            if param.grad is not None:
+                print(f"AFTER allreduce - {name}: param={param.device}, grad={param.grad.device}")
         self.icm_optimizer.step()
         self.icm_lr_scheduler.step()
 
         icm_loss_val = icm_loss.item()
         del s_t_batch, a_t_batch, s_t1_batch, icm_loss
 
-        intrinsic_reward = 0.5 * (next_state - next_state_hat).norm(2, dim=-1)
-        mean = intrinsic_reward.mean()
-        var = intrinsic_reward.var(unbiased=False)
-        intrinsic_reward = (intrinsic_reward - mean) * torch.rsqrt(var + 1e-8)
+        intrinsic_reward = (next_state - next_state_hat).norm(2, dim=-1)
+        #mean = intrinsic_reward.mean()
+        #var = intrinsic_reward.var(unbiased=False)
+        #intrinsic_reward = (intrinsic_reward - mean) * torch.rsqrt(var + 1e-8)
         intrinsic_reward = intrinsic_reward.detach().cpu()
+        self._soo_debug_log(
+            f"intrinsic_reward: shape={tuple(intrinsic_reward.shape)} "
+         #   f"mean={intrinsic_reward.mean().item():.6f} std={intrinsic_reward.std().item():.6f} "
+            f"first10={intrinsic_reward[:10].tolist()}"
+        )
 
         del next_state, next_state_hat
         torch.cuda.empty_cache()
 
         return intrinsic_reward, pair_map, icm_loss_val
+
+    def _extract_tokenlevel_current_states(self, hidden_tensor, batch_td, max_response_len):  #SOO: token level ICM
+        """
+        Returns (B, max_response_len, H): [last_prompt_token, resp_0, ..., resp_{L-2}] per sample.
+        Mirrors CD-RLHF's hidden_states[:, start:-1, :] where start = prompt_len - 1.
+        """
+        import torch.nn.functional as F
+        values = hidden_tensor.values() if hidden_tensor.is_nested else hidden_tensor
+        prompt_ids = batch_td["prompts"]
+        attention_mask = batch_td["attention_mask"]
+
+        prompt_lens = attention_mask[:, :prompt_ids.shape[1]].sum(dim=1)
+        response_lens = attention_mask[:, prompt_ids.shape[1]:].sum(dim=1)
+
+        sequence_lens = prompt_lens + response_lens
+        sequence_offsets = sequence_lens.cumsum(dim=0)
+
+        H = values.shape[-1]
+        result_list = []
+        for resp_len, seq_offset in zip(response_lens.tolist(), sequence_offsets.tolist()):
+            resp_len, seq_offset = int(resp_len), int(seq_offset)
+            pad_size = max_response_len - resp_len
+            # [last_prompt_token, resp_0, ..., resp_{L-2}] = resp_len tokens
+            curr = values[seq_offset - resp_len - 1 : seq_offset - 1, :]
+            result_list.append(F.pad(curr, (0, 0, 0, pad_size)))
+        return torch.stack(result_list)  # (B, max_response_len, H)
+
+    def _compute_tokenlevel_icm(self, current_states, next_states, action_states, response_mask):  #SOO: token level ICM
+        """
+        All states: (B, max_response_len, H), right-padded.
+        response_mask: (B, max_response_len) int, 1 for valid tokens.
+        Returns: (intrinsic_rewards: (B, max_response_len) cpu tensor, icm_loss_val: float)
+        Follows CD-RLHF: reward = whiten(0.5 * ||s_{t+1} - s_{t+1}_hat||_2) per token.
+        """
+        from icm.icm_module import whiten
+        device = next(self.tokenlevel_icm.parameters()).device
+        B, max_resp_len, H = current_states.shape
+
+        mask_flat = response_mask.bool().view(-1)  # (B * max_resp_len,)
+        s_t   = current_states.view(-1, H)[mask_flat].to(device=device, dtype=torch.float32)
+        a_t   = action_states.view(-1, H)[mask_flat].to(device=device, dtype=torch.float32)
+        s_t1  = next_states.view(-1, H)[mask_flat].to(device=device, dtype=torch.float32)
+
+        next_state_enc, next_state_hat = self.tokenlevel_icm(s_t, s_t1, a_t)
+
+        # Intrinsic reward before backward (values still valid)
+        raw_reward = 0.5 * (next_state_enc.detach() - next_state_hat.detach()).norm(2, dim=-1)
+        whitened = whiten(raw_reward).detach().cpu()
+
+        # ICM loss + update
+        icm_loss = self.tokenlevel_icm.icm_loss(next_state_enc, next_state_hat)
+        self.tokenlevel_icm_optimizer.zero_grad()
+        icm_loss.backward()
+        for param in self.tokenlevel_icm.parameters():
+            if param.grad is not None:
+                torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG)
+        self.tokenlevel_icm_optimizer.step()
+        self.tokenlevel_icm_lr_scheduler.step()
+        icm_loss_val = icm_loss.item()
+
+        # Scatter whitened rewards back to (B, max_resp_len)
+        reward_flat = torch.zeros(B * max_resp_len)
+        reward_flat[mask_flat.cpu()] = whitened
+        intrinsic_rewards = reward_flat.view(B, max_resp_len)
+
+        del s_t, a_t, s_t1, next_state_enc, next_state_hat, icm_loss
+        torch.cuda.empty_cache()
+        return intrinsic_rewards, icm_loss_val
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    def compute_tokenlevel_curiosity(self, batch):  #SOO: token level ICM
+        """
+        Token-level ICM following CD-RLHF.
+        States:  ref hidden states at [last_prompt_token, resp_0, ..., resp_{L-2}]
+        Next states: ref hidden states at [resp_0, ..., resp_{L-1}]
+        Actions: actor hidden states at [resp_0, ..., resp_{L-1}]
+        Returns DataProto with tokenlevel_intrinsic_rewards (B, max_resp_len) and tokenlevel_icm_loss.
+        """
+        batch_size = len(batch)
+        response_mask = batch.batch["response_mask"]  # (B, max_resp_len)
+        max_response_len = response_mask.shape[1]
+
+        # -- ref hidden states --
+        batch_td_ref = batch.to_tensordict()
+        batch_td_ref = left_right_2_no_padding(batch_td_ref)
+        metadata = {"calculate_entropy": False, "compute_loss": False, "output_hidden_states": True}
+        if self.config.ref_in_actor:
+            metadata["no_lora_adapter"] = True
+        tu.assign_non_tensor(batch_td_ref, **metadata)
+        ref_output = self.ref.infer_batch(batch_td_ref)
+        ref_hidden_raw = tu.get(ref_output, "hidden_states", default=None)
+
+        current_states = self._extract_tokenlevel_current_states(ref_hidden_raw, batch_td_ref, max_response_len)
+        next_states    = no_padding_2_padding(ref_hidden_raw, batch_td_ref, is_hidden_states=True)
+        del ref_output, ref_hidden_raw, batch_td_ref
+
+        # -- actor hidden states (actions) --
+        batch_td_actor = batch.to_tensordict()
+        batch_td_actor = left_right_2_no_padding(batch_td_actor)
+        tu.assign_non_tensor(batch_td_actor, calculate_entropy=False, compute_loss=False, output_hidden_states=True)
+        actor_output = self.actor.infer_batch(batch_td_actor)
+        actor_hidden_raw = tu.get(actor_output, "hidden_states", default=None)
+        action_states = no_padding_2_padding(actor_hidden_raw, batch_td_actor, is_hidden_states=True)
+        del actor_output, actor_hidden_raw, batch_td_actor
+        torch.cuda.empty_cache()
+
+        # -- token-level ICM --
+        intrinsic_rewards, icm_loss_val = self._compute_tokenlevel_icm(
+            current_states, next_states, action_states, response_mask
+        )
+
+        return DataProto(
+            batch=TensorDict(
+                {"tokenlevel_intrinsic_rewards": intrinsic_rewards},
+                batch_size=batch_size,
+            ),
+            non_tensor_batch={
+                "tokenlevel_icm_loss": np.array([icm_loss_val] * batch_size, dtype=np.float32),
+            },
+        )
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     def compute_curiosity(self, batch):
@@ -1099,15 +1360,22 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         step_sep = batch.meta_info.get("step_sep", None)
         with marked_timer("parse", self.timing_raw):
             batch = self._attach_parsed_steps(batch, step_sep=step_sep)
-        with marked_timer("prm_score", self.timing_raw):
-            batch = self._score_prm(batch)
+        use_prm_mask = self.config.icm.get("prm_mask", True)  #SOO: PRM Modification
+        if use_prm_mask:
+            with marked_timer("prm_score", self.timing_raw):
+                batch = self._score_prm(batch)
+        else:
+            # prm_mask=False: skip PRM scoring, treat all steps as positive (label=1)
+            all_labels = [
+                [1] * max(len(batch.non_tensor_batch["parsed_steps"][i]) if batch.non_tensor_batch["parsed_steps"][i] is not None else 0, 0)
+                for i in range(len(batch))
+            ]
+            batch.non_tensor_batch["prm_labels"] = np.array(all_labels, dtype=object)
         # print(f"[PRM-DEBUG] prm_labels len: {len(batch.non_tensor_batch['prm_labels'])}", flush=True) # batch size = 32개 데이터
         # [list([1, 1, 1, 1, 0]) list([1, 1, 1, 1, 1, 0]) list([1, 1, 1, 1, 0, 0]) list([1, 0, 0]) list([1, 1, 0, 0, 0, 0, 0, 0, 0, 0])]
 
         step_boundaries = batch.non_tensor_batch["step_boundaries"]
-        # print(f"[ICM-DEBUG] step_boundaries len: {len(step_boundaries)}", flush=True) # batch size = 32개 데이터
-        # print(f"[ICM-DEBUG] first step_boundaries: {step_boundaries[0]} (showing first sample)", flush=True)
-        # [[0, 27, 51, 71, 93, 117], [0, 23, 62, 121, 164, 193, 222], [73, 161, 259, 586, 704, 734, 963], [0, 123, 201, 248], [0, 41, 73, 101, 163, 199, 236, 260, 301, 329, 490]] (batch size 32)
+        self._soo_debug_log(f"step_boundaries: batch_size={len(step_boundaries)}")
 
         # 2. compute ICM loss
         # print(f"[ICM-DEBUG] Computing reference hidden states", flush=True)
@@ -1127,12 +1395,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # print(f"[ICM-DEBUG] Computing ICM intrinsic rewards", flush=True)
         with marked_timer("icm_compute", self.timing_raw):
-            intrinsic_reward, pair_map, icm_loss_val = self._compute_icm(batch.non_tensor_batch["ref_hidden_states"], batch.non_tensor_batch["actor_hidden_states"])
-        # print(f"[ICM-DEBUG] icm_loss: {icm_loss_val}", flush=True) # 8.375
-        # print(f"[ICM-DEBUG] intrinsic_reward shape:{intrinsic_reward.shape}", flush=True) # torch.Size([1327]) 총 step 수
-        # print(f"[ICM-DEBUG] intrinsic_reward sample: {intrinsic_reward[:10]} (showing first 5 samples)", flush=True) # tensor([ 0.6016,  0.1338,  0.4023,  1.0000,  2.0000, -0.3340, -0.7344, -0.4023, -0.3340,  0.2676], dtype=torch.bfloat16)
-        # print(f"[ICM-DEBUG] pair_map len: {len(pair_map)}", flush=True) # 1327 총 step 수
-        # print(f"[ICM-DEBUG] pair_map sample: {pair_map[:10]} (showing first 5 samples)", flush=True) # [(0, 0), (0, 1), (0, 2), (0, 3), (0, 4), (1, 0), (1, 1), (1, 2), (1, 3), (1, 4)]
+            intrinsic_reward, pair_map, icm_loss_val = self._compute_icm(
+                batch.non_tensor_batch["ref_hidden_states"],
+                batch.non_tensor_batch["actor_hidden_states"],
+            )
+        self._soo_debug_log(f"icm_loss_val (returned): {icm_loss_val:.6f}")
 
         # reorganize intrinsic_reward and pair map to align with batch samples
         pair_map = [(idx + data_idx_offset, step_idx) for idx, step_idx in pair_map]
