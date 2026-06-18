@@ -125,6 +125,10 @@ offload=False
 gen_tp=2
 
 # curiosity 추가한 인자
+#[Sumwoo]
+#weight_overload = Ture/False # False: default
+#weight_overload_method =  "1epoch" "2epoch" "mixing" : overload policy--> ref every 1/2epoch /
+#percentage_of_mixing = 0.0 ~ 1.0 : mixing policy--> ref every x% of the total training steps
 use_curiosity=True
 STEP_SEP="Step"
 icm_intermediate_size=8192
@@ -132,8 +136,8 @@ icm_lr=1e-4
 icm_lr_scheduler_type="linear"
 icm_warmup_steps=10
 icm_intrinsic_reward_token="last_step_token" # "last_step_token" or "all_step_tokens"
-icm_calculation="normalize" # "clip" or "normalize"
-icm_eta=0.5
+icm_calculation="clip" # "clip" or "normalize"
+icm_eta=1.0
 prm_mask=True  #SOO: PRM Modification
 use_tokenlevel_curiosity=False  #SOO: token level ICM
 eta_token=0.01                  #SOO: token level ICM

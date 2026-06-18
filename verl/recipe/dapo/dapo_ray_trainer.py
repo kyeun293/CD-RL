@@ -138,6 +138,7 @@ class RayDAPOTrainer(RayPPOTrainer):
             r_min, r_max = raw_arr.min(), raw_arr.max()
 
             for (data_idx, start, end, prm_label), raw in zip(entries, raw_vals):
+                #SOO: clip or normalize of icm.
                 if icm_calculation == "clip":
                     scaled = float(eta * np.clip(raw, 0.0, 1.0))
                 else:  # normalize
