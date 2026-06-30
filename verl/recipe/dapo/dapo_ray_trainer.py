@@ -56,10 +56,12 @@ class RayDAPOTrainer(RayPPOTrainer):
         self._step_sep = self.config.actor_rollout_ref.get("step_sep", None)       ##SOO
         self.save_curiosity_scores = self.config.trainer.get("save_curiosity_scores", False)
         self._use_tokenlevel_curiosity = self.config.algorithm.get("use_tokenlevel_curiosity", False)  #SOO: token level ICM
+        self._use_answerlevel_curiosity = self.config.algorithm.get("use_answerlevel_curiosity", False)  #SOO: answer level ICM
         print(f"[INIT-DEBUG] use_curiosity: {self._use_curiosity}", flush=True)
         print(f"[INIT-DEBUG] step_sep: {repr(self._step_sep)}", flush=True)
         print(f"[INIT-DEBUG] save_curiosity_scores: {self.save_curiosity_scores}", flush=True)
         print(f"[INIT-DEBUG] use_tokenlevel_curiosity: {self._use_tokenlevel_curiosity}", flush=True)
+        print(f"[INIT-DEBUG] use_answerlevel_curiosity: {self._use_answerlevel_curiosity}", flush=True)
 
     def compute_kl_related_metrics(self, batch: DataProto, metrics: dict, timing_raw: dict):
         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -133,23 +135,57 @@ class RayDAPOTrainer(RayPPOTrainer):
             eta = self.config.actor_rollout_ref.icm.eta
             reward_token = self.config.actor_rollout_ref.icm.intrinsic_reward_token
             icm_calculation = self.config.actor_rollout_ref.icm.icm_calculation
-            step_num = len(prm_labels)
 
             r_min, r_max = raw_arr.min(), raw_arr.max()
 
-            for (data_idx, start, end, prm_label), raw in zip(entries, raw_vals):
-                #SOO: clip or normalize of icm.
+            if icm_calculation == "whiten":
+                mean = raw_arr.mean()
+                var = raw_arr.var()
+                whitened_arr = (raw_arr - mean) / np.sqrt(var + 1e-8)
+
+            if icm_calculation == "whiten_prm":
+                prm_raw_vals_w = [raw for (_, _, _, prm_label), raw in zip(entries, raw_vals) if prm_label == 1]
+                if prm_raw_vals_w:
+                    prm_arr_w = np.array(prm_raw_vals_w)
+                    prm_mean = prm_arr_w.mean()
+                    prm_var = prm_arr_w.var()
+                else:
+                    prm_mean = raw_arr.mean()
+                    prm_var = raw_arr.var()
+                whitened_prm_arr = (raw_arr - prm_mean) / np.sqrt(prm_var + 1e-8)
+
+            if icm_calculation == "normalize_prm":
+                prm_raw_vals = [raw for (_, _, _, prm_label), raw in zip(entries, raw_vals) if prm_label == 1]
+                if prm_raw_vals:
+                    prm_arr = np.array(prm_raw_vals)
+                    prm_r_min, prm_r_max = prm_arr.min(), prm_arr.max()
+                else:
+                    prm_r_min, prm_r_max = r_min, r_max
+
+            for k, ((data_idx, start, end, prm_label), raw) in enumerate(zip(entries, raw_vals)):
+                #SOO: clip, normalize, whiten, or normalize_prm of icm.
                 if icm_calculation == "clip":
                     scaled = float(eta * np.clip(raw, 0.0, 1.0))
-                else:  # normalize
+                elif icm_calculation == "normalize":
                     normalized = (raw - r_min) / (r_max - r_min + 1e-8)
                     scaled = float(eta * normalized)
+                elif icm_calculation == "normalize_prm":
+                    # normalize using min/max computed only over prm==1 entries
+                    normalized = (raw - prm_r_min) / (prm_r_max - prm_r_min + 1e-8)
+                    scaled = float(eta * normalized)
+                elif icm_calculation == "whiten_prm":
+                    # whiten using mean/var computed only over prm==1 entries
+                    scaled = float(eta * whitened_prm_arr[k])
+                else:  # whiten
+                    scaled = float(eta * whitened_arr[k])
                 scaled_vals.append(scaled)
 
                 if reward_token == "all_step_tokens":
                     batch.batch["token_level_rewards"][data_idx, start:end] += scaled * prm_label
-                elif reward_token == "last_step_token" and step_num > 0:
-                    batch.batch["token_level_rewards"][data_idx, end - 1] += scaled * prm_label / step_num
+                elif reward_token == "last_step_token":
+                    n_steps = sum(prm_labels[data_idx])
+                    if n_steps > 0:
+                        batch.batch["token_level_rewards"][data_idx, end - 1] += scaled * prm_label / n_steps
 
         if raw_vals:
             import wandb
@@ -181,6 +217,35 @@ class RayDAPOTrainer(RayPPOTrainer):
             "tokenlevel_icm/intrinsic_reward/mean": intrinsic_rewards[valid].mean().item(),
             "tokenlevel_icm/intrinsic_reward/max":  intrinsic_rewards[valid].max().item(),
             "tokenlevel_icm/intrinsic_reward/min":  intrinsic_rewards[valid].min().item(),
+        }, step=self.global_steps)
+        return batch
+
+    def add_answerlevel_intrinsic_reward(self, batch, answerlevel_result):  #SOO: answer level ICM
+        """
+        Adds eta_answer * whitened_icm_error to the last response token,
+        only for sequences where the extrinsic reward is positive (correct answer).
+        """
+        intrinsic_rewards = answerlevel_result.batch["answerlevel_intrinsic_rewards"]  # (B,)
+        eta_answer = self.config.actor_rollout_ref.answerlevel_icm.eta_answer
+
+        # correctness mask: sequences with positive extrinsic reward
+        seq_scores = batch.batch["token_level_scores"].sum(dim=-1)  # (B,)
+        correct_mask = (seq_scores > 0).float()                      # (B,)
+
+        # last valid response token position per sequence
+        response_mask = batch.batch["response_mask"]                  # (B, max_resp_len)
+        last_token_idx = response_mask.sum(dim=-1).long() - 1        # (B,)
+
+        scaled = eta_answer * intrinsic_rewards * correct_mask        # (B,)
+        for i in range(len(batch)):
+            if scaled[i] != 0:
+                batch.batch["token_level_rewards"][i, last_token_idx[i]] += scaled[i].item()
+
+        wandb.log({
+            "answerlevel_icm/intrinsic_reward/mean": intrinsic_rewards.mean().item(),
+            "answerlevel_icm/intrinsic_reward/max":  intrinsic_rewards.max().item(),
+            "answerlevel_icm/intrinsic_reward/min":  intrinsic_rewards.min().item(),
+            "answerlevel_icm/correct_ratio": correct_mask.mean().item(),
         }, step=self.global_steps)
         return batch
 
@@ -417,6 +482,10 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                         batch.batch["ref_log_prob"] = curiosity_result.batch["ref_log_prob"]
                         metrics["train/icm_loss"] = curiosity_result.non_tensor_batch["icm_loss"].mean().item()
+                        all_prm_labels = curiosity_result.non_tensor_batch["prm_labels"]
+                        flat_labels = [lbl for labels in all_prm_labels for lbl in labels]
+                        if flat_labels:
+                            metrics["train/prm_label_mean"] = float(np.mean(flat_labels))
 
                         # save curiosity scores for analysis
                         if self.save_curiosity_scores:
@@ -468,6 +537,14 @@ class RayDAPOTrainer(RayPPOTrainer):
                             tokenlevel_result = self.actor_rollout_wg.compute_tokenlevel_curiosity(batch)
                         metrics["train/tokenlevel_icm_loss"] = tokenlevel_result.non_tensor_batch["tokenlevel_icm_loss"].mean().item()
                         batch = self.add_tokenlevel_intrinsic_reward(batch, tokenlevel_result)
+
+                    # answer-level ICM (only applied on correct answers)  #SOO: answer level ICM
+                    if self._use_answerlevel_curiosity:
+                        with marked_timer("answerlevel_curiosity", timing_raw, "magenta"):
+                            print(f"[CURIO-DEBUG] Computing answer-level curiosity scores", flush=True)
+                            answerlevel_result = self.actor_rollout_wg.compute_answerlevel_curiosity(batch)
+                        metrics["train/answerlevel_icm_loss"] = answerlevel_result.non_tensor_batch["answerlevel_icm_loss"].mean().item()
+                        batch = self.add_answerlevel_intrinsic_reward(batch, answerlevel_result)
 
                     # === Updating ===
                     # Balance the number of valid tokens across DP ranks.
@@ -542,6 +619,16 @@ class RayDAPOTrainer(RayPPOTrainer):
 
                         with marked_timer("update_weights", timing_raw, "red"):
                             self.checkpoint_manager.update_weights()
+
+                        if (
+                            self.config.algorithm.get("overload_actor_to_ref", False)
+                            and self.config.algorithm.overload_actor_to_ref_freq > 0
+                            and self.global_steps % self.config.algorithm.overload_actor_to_ref_freq == 0
+                        ):
+                            with marked_timer("sync_ref_from_actor", timing_raw, "cyan"):
+                                self.actor_rollout_wg.sync_ref_from_actor()
+                            print(f"[OVERLOAD] Synced actor → ref at step {self.global_steps}", flush=True)
+
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 

@@ -33,7 +33,7 @@ DEBUG=${DEBUG:-false}
 # ────────────────────────────────────────────────────────────────────────────
 
 project_name='CDRL-DAPO-Qwen2.5-3B-Instruct'
-exp_name='CDRL-DAPO-Qwen2.5-3B-Instruct-1.7k_subset'
+exp_name='CDRL-DAPO-Qwen2.5-3B-Instruct-1.7k_Whiten_PRM_reward'
 
 adv_estimator=grpo
 
@@ -87,7 +87,7 @@ TEST_FILE=${TEST_FILE:-"${DATA_HOME_PATH}/aime-2024.parquet"}
 
 # Resume: auto-detect latest checkpoint from latest_checkpointed_iteration.txt
 # Set FRESH_START=true to ignore checkpoints and start from step 0.
-FRESH_START=${FRESH_START:-false}
+FRESH_START=${FRESH_START:-true}
 LATEST_ITER_FILE="${CKPTS_DIR}/latest_checkpointed_iteration.txt"
 if [[ "${FRESH_START}" == "true" ]]; then
     RESUME_MODE="disable"
@@ -130,17 +130,22 @@ gen_tp=2
 #weight_overload_method =  "1epoch" "2epoch" "mixing" : overload policy--> ref every 1/2epoch /
 #percentage_of_mixing = 0.0 ~ 1.0 : mixing policy--> ref every x% of the total training steps
 use_curiosity=True
+overload_actor_to_ref=False
+overload_actor_to_ref_freq=100
 STEP_SEP="Step"
 icm_intermediate_size=8192
 icm_lr=1e-4
 icm_lr_scheduler_type="linear"
 icm_warmup_steps=10
 icm_intrinsic_reward_token="last_step_token" # "last_step_token" or "all_step_tokens"
-icm_calculation="clip" # "clip" or "normalize"
-icm_eta=1.0
-prm_mask=True  #SOO: PRM Modification
+icm_calculation="normalize_prm" # "clip" or "normalize" or "whiten" or "normalize_prm" or "whiten_prm"
+icm_eta=0.5
+
+prm_mask=True  #SOO: PRM Modification, Default is True
 use_tokenlevel_curiosity=False  #SOO: token level ICM
-eta_token=0.01                  #SOO: token level ICM
+eta_token=0.04                  #SOO: token level ICM
+use_answerlevel_curiosity=False  #SOO: answer level ICM
+eta_answer=0.1                   #SOO: answer level ICM
 
 "${RAY_BIN}" job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
@@ -160,6 +165,8 @@ eta_token=0.01                  #SOO: token level ICM
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
     algorithm.use_curiosity=${use_curiosity} \
+    algorithm.overload_actor_to_ref=${overload_actor_to_ref} \
+    algorithm.overload_actor_to_ref_freq=${overload_actor_to_ref_freq} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
@@ -177,6 +184,8 @@ eta_token=0.01                  #SOO: token level ICM
     actor_rollout_ref.icm.prm_mask=${prm_mask} \
     algorithm.use_tokenlevel_curiosity=${use_tokenlevel_curiosity} \
     actor_rollout_ref.tokenlevel_icm.eta_token=${eta_token} \
+    algorithm.use_answerlevel_curiosity=${use_answerlevel_curiosity} \
+    actor_rollout_ref.answerlevel_icm.eta_answer=${eta_answer} \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
     algorithm.filter_groups.metric=${filter_groups_metric} \

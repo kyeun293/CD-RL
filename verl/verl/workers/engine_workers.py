@@ -728,6 +728,35 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
             print(f"[INIT-DEBUG] TokenLevelICM initialized on {self.device}", flush=True)
 
+        # 7. build answer-level ICM module  #SOO: answer level ICM
+        if "actor" in self.role and self.config.get('use_answerlevel_curiosity', False):
+            from icm.icm_module import ICM
+            from transformers import get_scheduler, AutoConfig
+
+            if not hasattr(self, '_answerlevel_model_config'):
+                _model_config = AutoConfig.from_pretrained(self.config.model.path)
+                hidden_size = _model_config.hidden_size
+            else:
+                hidden_size = model_config.hidden_size
+
+            answerlevel_icm_config = self.config.answerlevel_icm
+            intermediate_size = answerlevel_icm_config.icm_intermediate_size
+            total_steps = self.config.total_training_steps
+
+            self.answerlevel_icm = ICM(hidden_size, intermediate_size).to(dtype=torch.float32, device=self.device)
+            self.answerlevel_icm_optimizer = torch.optim.Adam(
+                self.answerlevel_icm.parameters(),
+                lr=answerlevel_icm_config.lr,
+                betas=(0.9, 0.95),
+            )
+            self.answerlevel_icm_lr_scheduler = get_scheduler(
+                name=answerlevel_icm_config.lr_scheduler_type,
+                optimizer=self.answerlevel_icm_optimizer,
+                num_warmup_steps=answerlevel_icm_config.warmup_steps,
+                num_training_steps=total_steps,
+            )
+            print(f"[INIT-DEBUG] AnswerLevelICM initialized on {self.device}", flush=True)
+
         # Free cached GPU memory so colocated vLLM processes can see it via cudaMemGetInfo
         aggressive_empty_cache(force_sync=True)
 
@@ -890,6 +919,23 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     s[k] = v.to(target_device)
         self.icm_lr_scheduler.load_state_dict(state["icm_lr_scheduler"])
 
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def sync_ref_from_actor(self):
+        """Overwrite ref model weights with the current actor weights (no LoRA assumed).
+
+        Actor and ref share the same FSDP group and sharding strategy, so each rank holds
+        the identical shard for both models. We copy shard-to-shard directly — no
+        summon_full_params needed, zero extra GPU memory allocated.
+        """
+        actor_module = self.actor.engine.module
+        ref_module = self.ref.engine.module
+
+        for ref_param, actor_param in zip(ref_module.parameters(), actor_module.parameters()):
+            ref_param.data.copy_(actor_param.data)
+
+        if torch.distributed.get_rank() == 0:
+            print("[OVERLOAD] sync_ref_from_actor: ref weights updated from actor.", flush=True)
+
     def _soo_debug_enabled(self) -> bool:
         if not torch.distributed.is_initialized():
             return True
@@ -1015,7 +1061,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         if self.config.ref_in_actor:
             metadata["no_lora_adapter"] = True
         tu.assign_non_tensor(batch_td, **metadata)
-        
+        ### self.ref: reference model   
         output = self.ref.infer_batch(batch_td)
 
         log_probs = tu.get(output, "log_probs", default=None)
@@ -1056,6 +1102,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         batch_td = left_right_2_no_padding(batch_td)
         tu.assign_non_tensor(batch_td, calculate_entropy=False, compute_loss=False, output_hidden_states=True)
         
+        ### self.actor: actor model
         output = self.actor.infer_batch(batch_td)
         
         hidden_states = tu.get(output, "hidden_states", default=None)
@@ -1260,9 +1307,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         All states: (B, max_response_len, H), right-padded.
         response_mask: (B, max_response_len) int, 1 for valid tokens.
         Returns: (intrinsic_rewards: (B, max_response_len) cpu tensor, icm_loss_val: float)
-        Follows CD-RLHF: reward = whiten(0.5 * ||s_{t+1} - s_{t+1}_hat||_2) per token.
+        Reward = min-max normalize(0.5 * ||s_{t+1} - s_{t+1}_hat||_2) per token → [0, 1].
         """
-        from icm.icm_module import whiten
         device = next(self.tokenlevel_icm.parameters()).device
         B, max_resp_len, H = current_states.shape
 
@@ -1275,7 +1321,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # Intrinsic reward before backward (values still valid)
         raw_reward = 0.5 * (next_state_enc.detach() - next_state_hat.detach()).norm(2, dim=-1)
-        whitened = whiten(raw_reward).detach().cpu()
+        r_min, r_max = raw_reward.min(), raw_reward.max()
+        normalized = ((raw_reward - r_min) / (r_max - r_min + 1e-8)).detach().cpu()
 
         # ICM loss + update
         icm_loss = self.tokenlevel_icm.icm_loss(next_state_enc, next_state_hat)
@@ -1288,14 +1335,114 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self.tokenlevel_icm_lr_scheduler.step()
         icm_loss_val = icm_loss.item()
 
-        # Scatter whitened rewards back to (B, max_resp_len)
+        # Scatter normalized rewards back to (B, max_resp_len)
         reward_flat = torch.zeros(B * max_resp_len)
-        reward_flat[mask_flat.cpu()] = whitened
+        reward_flat[mask_flat.cpu()] = normalized
         intrinsic_rewards = reward_flat.view(B, max_resp_len)
 
         del s_t, a_t, s_t1, next_state_enc, next_state_hat, icm_loss
         torch.cuda.empty_cache()
         return intrinsic_rewards, icm_loss_val
+
+    def _extract_answerlevel_states(self, hidden_tensor, batch_td):  #SOO: answer level ICM
+        """
+        Returns:
+          last_prompt_states:   (B, H) ref hidden at last prompt token  (s_t)
+          last_response_states: (B, H) ref hidden at last response token (s_{t+1})
+        """
+        values = hidden_tensor.values() if hidden_tensor.is_nested else hidden_tensor
+        prompt_ids = batch_td["prompts"]
+        attention_mask = batch_td["attention_mask"]
+
+        prompt_lens = attention_mask[:, :prompt_ids.shape[1]].sum(dim=1)
+        response_lens = attention_mask[:, prompt_ids.shape[1]:].sum(dim=1)
+        sequence_offsets = (prompt_lens + response_lens).cumsum(dim=0)
+
+        last_prompt_list, last_response_list = [], []
+        for resp_len, seq_offset in zip(response_lens.tolist(), sequence_offsets.tolist()):
+            resp_len, seq_offset = int(resp_len), int(seq_offset)
+            last_prompt_list.append(values[seq_offset - resp_len - 1])
+            last_response_list.append(values[seq_offset - 1])
+
+        return torch.stack(last_prompt_list), torch.stack(last_response_list)  # each (B, H)
+
+    def _compute_answerlevel_icm(self, s_t, s_t1, a_t):  #SOO: answer level ICM
+        """
+        s_t, s_t1, a_t: (B, H)
+        Returns: (intrinsic_rewards: (B,) cpu tensor, icm_loss_val: float)
+        Reward = min-max normalize(0.5 * ||s_{t+1}_enc - s_{t+1}_hat||_2) per sequence → [0, 1].
+        """
+        device = next(self.answerlevel_icm.parameters()).device
+
+        s_t  = s_t.to(device=device, dtype=torch.float32)
+        s_t1 = s_t1.to(device=device, dtype=torch.float32)
+        a_t  = a_t.to(device=device, dtype=torch.float32)
+
+        next_state_enc, next_state_hat = self.answerlevel_icm(s_t, s_t1, a_t)
+
+        raw_reward = 0.5 * (next_state_enc.detach() - next_state_hat.detach()).norm(2, dim=-1)  # (B,)
+        r_min, r_max = raw_reward.min(), raw_reward.max()
+        normalized = ((raw_reward - r_min) / (r_max - r_min + 1e-8)).detach().cpu()
+
+        icm_loss = self.answerlevel_icm.icm_loss(next_state_enc, next_state_hat)
+        self.answerlevel_icm_optimizer.zero_grad()
+        icm_loss.backward()
+        for param in self.answerlevel_icm.parameters():
+            if param.grad is not None:
+                torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG)
+        self.answerlevel_icm_optimizer.step()
+        self.answerlevel_icm_lr_scheduler.step()
+        icm_loss_val = icm_loss.item()
+
+        del s_t, s_t1, a_t, next_state_enc, next_state_hat, icm_loss
+        torch.cuda.empty_cache()
+        return normalized, icm_loss_val
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    def compute_answerlevel_curiosity(self, batch):  #SOO: answer level ICM
+        """
+        Answer-level ICM following CD-RLHF style.
+        s_t   = ref hidden state at last prompt token
+        s_{t+1} = ref hidden state at last response token
+        a_t   = actor hidden state at last response token
+        Returns DataProto with answerlevel_intrinsic_rewards (B,) and answerlevel_icm_loss.
+        """
+        batch_size = len(batch)
+
+        # ref hidden states
+        batch_td_ref = batch.to_tensordict()
+        batch_td_ref = left_right_2_no_padding(batch_td_ref)
+        metadata = {"calculate_entropy": False, "compute_loss": False, "output_hidden_states": True}
+        if self.config.ref_in_actor:
+            metadata["no_lora_adapter"] = True
+        tu.assign_non_tensor(batch_td_ref, **metadata)
+        ref_output = self.ref.infer_batch(batch_td_ref)
+        ref_hidden_raw = tu.get(ref_output, "hidden_states", default=None)
+
+        s_t, s_t1 = self._extract_answerlevel_states(ref_hidden_raw, batch_td_ref)
+        del ref_output, ref_hidden_raw
+
+        # actor hidden states (actions)
+        batch_td_actor = batch.to_tensordict()
+        batch_td_actor = left_right_2_no_padding(batch_td_actor)
+        tu.assign_non_tensor(batch_td_actor, calculate_entropy=False, compute_loss=False, output_hidden_states=True)
+        actor_output = self.actor.infer_batch(batch_td_actor)
+        actor_hidden_raw = tu.get(actor_output, "hidden_states", default=None)
+        _, a_t = self._extract_answerlevel_states(actor_hidden_raw, batch_td_actor)
+        del actor_output, actor_hidden_raw, batch_td_actor, batch_td_ref
+        torch.cuda.empty_cache()
+
+        intrinsic_rewards, icm_loss_val = self._compute_answerlevel_icm(s_t, s_t1, a_t)
+
+        return DataProto(
+            batch=TensorDict(
+                {"answerlevel_intrinsic_rewards": intrinsic_rewards},
+                batch_size=batch_size,
+            ),
+            non_tensor_batch={
+                "answerlevel_icm_loss": np.array([icm_loss_val] * batch_size, dtype=np.float32),
+            },
+        )
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     def compute_tokenlevel_curiosity(self, batch):  #SOO: token level ICM
