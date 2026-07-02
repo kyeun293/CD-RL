@@ -33,7 +33,7 @@ DEBUG=${DEBUG:-false}
 # ────────────────────────────────────────────────────────────────────────────
 
 project_name='CDRL-DAPO-Qwen2.5-3B-Instruct'
-exp_name='CDRL-DAPO-Qwen2.5-3B-Instruct-1.7k_Whiten_PRM_reward'
+exp_name='CDRL-DAPO-Qwen2.5-3B-Instruct-1.7k_NEW_Normalize_PRM'
 
 adv_estimator=grpo
 

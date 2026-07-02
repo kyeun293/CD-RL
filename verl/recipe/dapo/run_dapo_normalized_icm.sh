@@ -25,8 +25,8 @@ echo "[INFO] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 
 DEBUG=${DEBUG:-false}
 
-project_name='CDRL_normalized_icm_eta0.5'
-exp_name='CDRL-DAPO-Qwen2.5-3B-normalized-icm-eta0.5'
+project_name='CDRL-DAPO-Qwen2.5-3B-Instruct'
+exp_name='CDRL-DAPO-Qwen2.5-3B-Instruct-1.7k_subset_normalized'
 
 adv_estimator=grpo
 use_kl_in_reward=False
