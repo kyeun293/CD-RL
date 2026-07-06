@@ -46,7 +46,7 @@ from transformers import AutoTokenizer
 _SYSTEM_PROMPT = "Please reason step by step, and put your final answer within \\boxed{}."
 
 # Threshold for softmax probability of class 1 (correct): prob > THRESHOLD → step is correct.
-_SCORE_THRESHOLD = 0.4
+_SCORE_THRESHOLD = 0.8
 
 
 class PRMScorer:

@@ -216,7 +216,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                     with marked_timer("gen", timing_raw, "red"):
                         print(f"[GEN-DEBUG] Generating responses", flush=True)
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
-                        
+
+                    if "timing" in gen_batch_output.meta_info:
+                        timing_raw.update(gen_batch_output.meta_info.pop("timing"))
+
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
                         with marked_timer("gen_max", timing_raw, "red"):
                             gen_baseline_batch = deepcopy(gen_batch)

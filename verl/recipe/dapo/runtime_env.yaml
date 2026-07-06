@@ -5,3 +5,4 @@ env_vars:
   VLLM_USE_V1: "1"
   PATH: "/home/yeeun/miniconda3/envs/yeeun_cd/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   CUDA_VISIBLE_DEVICES: "2,3,4,5"
+  VERL_ZMQ_DIR: "/home/yeeun/ray_cd/zmq"

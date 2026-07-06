@@ -1,55 +1,16 @@
-#!/bin/bash
-# conda 환경 활성화
-source /home/soo/miniconda3/etc/profile.d/conda.sh
-conda activate verl
+#!/usr/bin/env bash
+set -xeuo pipefail
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export RAY_TMPDIR="/home/yeeun/ray_cd"
+export CUDA_VISIBLE_DEVICES=2,3,4,5
+export NCCL_SOCKET_NTHREADS=2
+export NCCL_NSOCKS_PERTHREAD=8
+export CUDA_DEVICE_MAX_CONNECTIONS=1
 
-# GPU 설정
-GPU_ID=2,3,4,5
-export CUDA_VISIBLE_DEVICES=$GPU_ID
-NNODES=1
-NGPUS_PER_NODE=4 # 학습용 gpu 수
-export VLLM_TORCH_COMPILE_LEVEL=0
-
-set -x
-export NCCL_DEBUG=INFO
-
-# current directory 이동
-basepath=/home/soo/yejin/CD-RL/verl
-cd $basepath
-export PYTHONPATH=$basepath:$PYTHONPATH
-
-# 기록
 project_name='DAPO-Qwen2.5-3B-Instruct'
-exp_name='DAPO-Qwen2.5-3B-Instruct-prm-1024-subset'
-LOG_OUTPUT=/home/soo/yejin/CD-RL/verl/my_scripts/logs
+exp_name='DAPO-Qwen2.5-3B-Instruct-no-prm-1024-subset'
 
-# ─── 시작 전 이전 잔여 프로세스 정리 ────────────────────────────────────────
-echo "[cleanup] Killing any leftover Ray/DAPO processes..."
-pkill -9 -u $USER -f "main_dapo"   2>/dev/null || true
-pkill -9 -u $USER -f "ray::"       2>/dev/null || true
-pkill -9 -u $USER -f "ray/dashboard" 2>/dev/null || true
-ray stop --force 2>/dev/null || true
-sleep 2
-rm -rf /dev/shm/${USER}_ray_tmp
-rm -rf /tmp/ray
-echo "[cleanup] Done."
- 
-# ─── 종료 시 자동 정리 (Ctrl+C / kill / 정상 종료 모두 처리) ─────────────────
-cleanup() {
-    echo "[cleanup] Caught exit signal. Cleaning up..."
-    # 로그 먼저 백업
-    cp -r /dev/shm/${USER}_ray_tmp/session_latest/logs/ /tmp/ray_logs_backup/ 2>/dev/null || true
-    pkill -9 -u $USER -f "main_dapo"   2>/dev/null || true
-    pkill -9 -u $USER -f "ray::"       2>/dev/null || true
-    pkill -9 -u $USER -f "ray/dashboard" 2>/dev/null || true
-    rm -rf /dev/shm/${USER}_ray_tmp
-    rm -rf /tmp/ray
-    echo "[cleanup] Done."
-}
-trap cleanup EXIT INT TERM
-
-# 학습 설정
-adv_estimator=grpo # critic 함수 이용하지 X
+adv_estimator=grpo
 
 use_kl_in_reward=False
 kl_coef=0.0
@@ -58,63 +19,52 @@ kl_loss_coef=0.0
 clip_ratio_low=0.2
 clip_ratio_high=0.28
 max_prompt_length=$((1024 * 2))
-max_response_length=$((1024 * 4)) # 4096에서 2048로 줄임 (속도 체감 대박)
+max_response_length=$((1024 * 2))
 enable_overlong_buffer=True
-overlong_buffer_len=$((256)) 
+overlong_buffer_len=$((256))
 overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
 enable_filter_groups=True
 filter_groups_metric=acc
-max_num_gen_batches=0            # 8 -> 1 (생성 오버헤드 감소)
+max_num_gen_batches=0
 
-train_prompt_bsz=64              # 8 -> 32 (전체 학습 효율 4배 향상)
+NNODES=1
+
+train_prompt_bsz=64
 gen_prompt_bsz=$((train_prompt_bsz * 2))
 n_resp_per_prompt=6
-train_prompt_mini_bsz=16          # 2 -> 8 (학습 단계 속도 향상)
+train_prompt_mini_bsz=16
+
+# Ray
+PWD=./
+RAY_ADDRESS=${RAY_ADDRESS:-"auto"}
+WORKING_DIR=${WORKING_DIR:-"/home/yeeun/CD-RL/verl"}
+RUNTIME_ENV=${RUNTIME_ENV:-"/home/yeeun/CD-RL/verl/recipe/dapo/runtime_env.yaml"}
 
 # Paths
-# Ray
-export RAY_TMPDIR=/dev/shm/yejin_ray_tmp
-mkdir -p $RAY_TMPDIR
-export VERL_ZMQ_DIR=/dev/shm
-export RAY_PORT=6380
-ray start --head --port=6380 --num-cpus=0 --num-gpus=0 --temp-dir=${RAY_TMPDIR}
-
-MODEL_PATH=${MODEL_PATH:-"${basepath}/models/Qwen2.5-3B-Instruct"}
-PRM_MODEL_PATH=${PRM_MODEL_PATH:-"${basepath}/models/Qwen2.5-Math-PRM-7B"}
-CKPTS_DIR=${CKPTS_DIR:-"${basepath}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${basepath}/data/dapo-math-17k-0pct.parquet"}
-TEST_FILE=${TEST_FILE:-"${basepath}/data/aime-2024.parquet"}
+RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
+MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2.5-3B-Instruct"}
+CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
+TRAIN_FILE=${TRAIN_FILE:-"/home/yeeun/CD-RL/verl/recipe/dapo/dataset/dapo-math-17k-104.parquet"}
+TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/aime-2024.parquet"}
 
 # Algorithm
 temperature=1.0
 top_p=1.0
-top_k=-1 # 0 for HF rollout, -1 for vLLM rollout
-val_top_p=0.7
+top_k=-1  # 0 for HF rollout, -1 for vLLM rollout
 
 # Performance Related Parameter
-sp_size=1 # curiosity 계산에서 sequence parallel 구현하지 않음 -> sp_size=1로 고정
-gen_tp=2
+sp_size=4
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
-# (2048 + 4096) * 2 = 12288
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
-# (2048 + 4096) * 2 = 12288
 offload=False
+gen_tp=2
 
-# 추가한 인자
-use_curiosity=True
-STEP_SEP="Step"
-icm_intermediate_size=8192
-icm_lr=1e-4
-icm_lr_scheduler_type="linear"
-icm_warmup_steps=10
-icm_intrinsic_reward_token="all_step_tokens" # "last_step_token" or "all_step_tokens"
-icm_eta=0.04
-
-echo "main_dapo 시작..."
-
-PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
+ray job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
+    --working-dir "${WORKING_DIR}" \
+    --address "${RAY_ADDRESS}" \
+    -- python3 -m recipe.dapo.main_dapo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${TEST_FILE}" \
     data.prompt_key=prompt \
@@ -127,20 +77,11 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     algorithm.adv_estimator=${adv_estimator} \
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
-    algorithm.use_curiosity=${use_curiosity} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
     actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high} \
     actor_rollout_ref.actor.clip_ratio_c=10.0 \
-    actor_rollout_ref.step_sep=${STEP_SEP} \
-    actor_rollout_ref.prm_model_path="${PRM_MODEL_PATH}" \
-    actor_rollout_ref.icm.icm_intermediate_size=${icm_intermediate_size} \
-    actor_rollout_ref.icm.lr=${icm_lr} \
-    actor_rollout_ref.icm.lr_scheduler_type=${icm_lr_scheduler_type} \
-    actor_rollout_ref.icm.warmup_steps=${icm_warmup_steps} \
-    actor_rollout_ref.icm.intrinsic_reward_token=${icm_intrinsic_reward_token} \
-    actor_rollout_ref.icm.eta=${icm_eta} \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
     algorithm.filter_groups.metric=${filter_groups_metric} \
@@ -153,6 +94,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
+    actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     +actor_rollout_ref.model.override_config.attention_dropout=0. \
     +actor_rollout_ref.model.override_config.embd_pdrop=0. \
@@ -168,7 +110,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$(((max_prompt_length + max_response_length) * 2)) \
@@ -179,8 +121,7 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.rollout.val_kwargs.top_p=${top_p} \
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.rollout.val_kwargs.n=1 \
-    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.val_kwargs.n=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=${offload} \
     actor_rollout_ref.ref.ulysses_sequence_parallel_size=${sp_size} \
     actor_rollout_ref.actor.fsdp_config.fsdp_size=-1 \
@@ -190,24 +131,20 @@ PYTHONUNBUFFERED=1 python3 -m recipe.dapo.main_dapo \
     reward.reward_kwargs.overlong_buffer_cfg.penalty_factor=${overlong_penalty_factor} \
     reward.reward_kwargs.overlong_buffer_cfg.log=False \
     reward.reward_kwargs.max_resp_len=${max_response_length} \
-    trainer.logger='["console","wandb"]' \
+    trainer.logger="['console','wandb']" \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
-    trainer.n_gpus_per_node=${NGPUS_PER_NODE} \
+    trainer.n_gpus_per_node=${sp_size} \
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
-    trainer.save_freq=5 \
+    trainer.save_freq=40 \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
-    trainer.resume_mode=auto \
-    trainer.save_curiosity_scores=True \
+    trainer.resume_mode=resume \
     actor_rollout_ref.actor.entropy_checkpointing=True \
     actor_rollout_ref.ref.entropy_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.forward_prefetch=True \
     actor_rollout_ref.ref.fsdp_config.forward_prefetch=True \
     actor_rollout_ref.actor.entropy_from_logits_with_chunking=True \
-    actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
-    +ray_kwargs.ray_init.include_dashboard=False \
-    +ray_kwargs.ray_init._temp_dir=${RAY_TMPDIR} \
-    2>&1 | tee "${LOG_OUTPUT}/${exp_name}.log"
+    actor_rollout_ref.ref.entropy_from_logits_with_chunking=True

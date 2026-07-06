@@ -1,4 +1,4 @@
-models/
+/models/
 ckpts/
 *.whl
 **/*.pt

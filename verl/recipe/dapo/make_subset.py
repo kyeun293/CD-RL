@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import os
 import pandas as pd
 import numpy as np
 
@@ -47,8 +48,8 @@ def mode_repeat(df, repeat, seed):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["sample", "repeat"], default="sample")
-    parser.add_argument("--frac", type=float, default=0.1, help="[sample] fraction of unique problems")
+    parser.add_argument("--mode", choices=["sample", "repeat"], default="repeat")
+    parser.add_argument("--frac", type=float, default=0.006, help="[sample] fraction of unique problems")
     parser.add_argument("--repeat", type=int, default=10, help="[repeat] rows per unique problem")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--input", type=str, default="/home/yeeun/verl/data/dapo-math-17k.parquet")
@@ -56,10 +57,14 @@ def main():
     args = parser.parse_args()
 
     if args.output is None:
+        output_dir = "/home/yeeun/CD-RL/verl/recipe/dapo/dataset"
+        input_basename = os.path.basename(args.input)
         if args.mode == "sample":
-            args.output = args.input.replace(".parquet", f"-{int(args.frac*100)}pct.parquet")
+            filename = input_basename.replace(".parquet", f"-{int(args.frac*100)}pct.parquet")
         else:
-            args.output = args.input.replace(".parquet", f"-all-{args.repeat}x.parquet")
+            filename = input_basename.replace(".parquet", f"-all-{args.repeat}x.parquet")
+        args.output = os.path.join(output_dir, filename)
+    os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
     print(f"Loading {args.input} ...")
     df = pd.read_parquet(args.input)
