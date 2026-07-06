@@ -527,7 +527,7 @@ class RayPPOTrainer:
             batch.pop(non_tensor_batch_keys=["teacher_multi_modal_data"])
         return teacher_batch
 
-    def _validate(self, merged: bool = False):
+    def _validate(self, merged: bool = False, n_val: int = None):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
@@ -539,6 +539,9 @@ class RayPPOTrainer:
         sample_turns = []
         sample_uids = []
 
+        if n_val is None:
+            n_val = self.config.actor_rollout_ref.rollout.val_kwargs.n
+
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
@@ -549,7 +552,7 @@ class RayPPOTrainer:
 
             # repeat test batch
             test_batch = test_batch.repeat(
-                repeat_times=self.config.actor_rollout_ref.rollout.val_kwargs.n, interleave=True
+                repeat_times=n_val, interleave=True
             )
 
             ground_truths = [
@@ -609,14 +612,15 @@ class RayPPOTrainer:
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
-            reward_extra_infos_dict["reward"].extend(scores)
+            reward_extra_infos_dict["reward_total"].extend(scores)
             for key, values in reward_extra_info.items():
-                if key not in reward_extra_infos_dict:
-                    reward_extra_infos_dict[key] = []
+                mapped_key = "external_reward" if key == "score" else key
+                if mapped_key not in reward_extra_infos_dict:
+                    reward_extra_infos_dict[mapped_key] = []
                 if isinstance(values, np.ndarray):
-                    reward_extra_infos_dict[key].extend(values.tolist())
+                    reward_extra_infos_dict[mapped_key].extend(values.tolist())
                 else:
-                    reward_extra_infos_dict[key].extend(values if isinstance(values, list) else [values])
+                    reward_extra_infos_dict[mapped_key].extend(values if isinstance(values, list) else [values])
 
             # collect num_turns of each prompt
             if "__num_turns__" in test_batch.non_tensor_batch:
@@ -729,8 +733,8 @@ class RayPPOTrainer:
         if self.hybrid_engine:
             actor_rollout_resource_pool = self.resource_pool_manager.get_resource_pool(actor_role)
             actor_rollout_cls = RayClassWithInitArgs(
-                cls=self.role_worker_mapping[actor_role],
-                config=self.config.actor_rollout_ref,
+                cls=self.role_worker_mapping[actor_role],   ##
+                config=self.config.actor_rollout_ref,       ## SOO: config.use_curiosity = Ture/False.. If True: icm.icm_module import ICM
                 distillation_config=self.config.get("distillation"),
                 role=str(actor_role),
             )
@@ -954,6 +958,7 @@ class RayPPOTrainer:
                 critic_local_path, critic_remote_path, self.global_steps, max_ckpt_to_keep=max_critic_ckpt_to_keep
             )
 
+
         # save dataloader
         local_mkdir_safe(local_global_step_folder)
         dataloader_local_path = os.path.join(local_global_step_folder, "data.pt")
@@ -961,9 +966,10 @@ class RayPPOTrainer:
             dataloader_state_dict = self.train_dataloader.state_dict()
         except StopIteration:
             dataloader_state_dict = None  # 에포크 끝나서 이터레이터 소진된 경우
-        torch.save(dataloader_state_dict, dataloader_local_path) 
+            print("[DEBUG] StopIteration 발생 - dataloader 소진됨!", flush=True)
+        torch.save(dataloader_state_dict, dataloader_local_path)
 
-        # ✅ ICM checkpoint 저장 추가
+        # ICM checkpoint 저장 추가
         if self._use_curiosity:
             icm_local_path = os.path.join(local_global_step_folder, "icm.pt")
             icm_state = self.actor_rollout_wg.get_icm_state()
@@ -1055,6 +1061,17 @@ class RayPPOTrainer:
                 self.train_dataloader.load_state_dict(dataloader_state_dict)
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
+        
+        # ICM checkpoint 로드
+        if self._use_curiosity:
+            icm_local_path = os.path.join(global_step_folder, "icm.pt")
+            if os.path.exists(icm_local_path):
+                icm_state = torch.load(icm_local_path, map_location="cpu", weights_only=False)
+                self.actor_rollout_wg.load_icm_state(icm_state)
+                print(f"[ICM] Loaded ICM checkpoint from {icm_local_path}", flush=True)
+            else:
+                print(f"[ICM] No ICM checkpoint found at {icm_local_path}, starting fresh", flush=True)
+
 
         # ✅ ICM checkpoint 로드
         if self._use_curiosity:
@@ -1717,6 +1734,12 @@ class RayPPOTrainer:
                         if is_last_step:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
+
+                # n=16 validation every 10 steps for pass@16 metrics
+                if self.global_steps % 10 == 0:
+                    with marked_timer("testing_n16", timing_raw, color="green"):
+                        val_metrics_n16: dict = self._validate(n_val=16)
+                    metrics.update(val_metrics_n16)
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (

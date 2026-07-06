@@ -1,0 +1,28 @@
+{
+    "original_question": "A list of positive integers has the following properties:\n\n\\bullet The sum of the items in the list is 30.\n\n\\bullet The unique mode of the list is 9.\n\n\\bullet The median of the list is a positive integer that does not appear in the list itself.\n\nFind the sum of the squares of all the items in the list.",
+    "summaries": [
+        {
+            "answer_id": 0,
+            "generated_summary": " ### Analysis\nThe problem involves finding a list of positive integers that meet specific conditions: summing to 30, having a mode of 9, and having a median that is a positive integer not in the list. The solution involves creating a list that meets these conditions and then calculating the sum of the squares of the elements in the list.\n\n### Final JSON Output\n```json\n{\n  \"logical_steps\": [\n    {\n      \"step_title\": \"Step 1: Create a List\",\n      \"step_description\": \"Create a list of positive integers that sum to 30, have a mode of 9, and have a median that is a positive integer not in the list.\"\n    },\n    {\n      \"step_title\": \"Step 2: Calculate the Sum of Squares\",\n      \"step_description\": \"Calculate the sum of the squares of the elements in the list.\"\n    }\n  ]\n}\n```",
+            "logical_steps": []
+        },
+        {
+            "answer_id": 1,
+            "generated_summary": " ### Analysis\n The solution involves constructing a list of positive integers that meets specific conditions, including sum, mode, and median criteria. The process involves balancing the sum, ensuring the mode is unique, and placing the median in a specific position.\n\n//boxed{\n  \"logical_steps\": [\n    {\n      \"step_title\": \"Step 1: Balance the Sum\",\n      \"step_description\": \"Start with the mode condition and adjust the list to balance the sum.\"\n    },\n    {\n      \"step_title\": \"Step 2: Ensure Unique Mode\",\n      \"step_description\": \"Adjust the list to ensure the mode is unique.\"\n    },\n    {\n      \"step_title\": \"Step 3: Place Median\",\n      \"step_description\": \"Place the median in a specific position to meet the median condition.\"\n    }\n  ]\n}",
+            "logical_steps": [
+                {
+                    "step_title": "Step 1: Balance the Sum",
+                    "step_description": "Start with the mode condition and adjust the list to balance the sum."
+                },
+                {
+                    "step_title": "Step 2: Ensure Unique Mode",
+                    "step_description": "Adjust the list to ensure the mode is unique."
+                },
+                {
+                    "step_title": "Step 3: Place Median",
+                    "step_description": "Place the median in a specific position to meet the median condition."
+                }
+            ]
+        }
+    ]
+}

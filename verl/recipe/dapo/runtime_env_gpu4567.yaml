@@ -1,0 +1,16 @@
+working_dir: ./
+excludes:
+  - "/.git/"
+  - "/ray_tmp/"
+  - "/models/"
+  - "/ckpts/"
+  - "/data/"
+  - "*.whl"
+pip:
+  - hydra-core
+env_vars:
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  VLLM_USE_V1: "1"
+  PATH: "/home/soo/miniconda3/envs/cdrl/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  CUDA_VISIBLE_DEVICES: "4,5,6,7"
+  RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES: "1"

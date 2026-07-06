@@ -572,7 +572,8 @@ def process_validation_metrics(
         ns = []
         n = 2
         while n < n_resps:
-            ns.append(n)
+            if n not in (4, 8):
+                ns.append(n)
             n *= 2
         ns.append(n_resps)
         return ns

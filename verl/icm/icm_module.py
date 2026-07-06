@@ -1,4 +1,12 @@
 import torch
+import torch.nn.functional as F
+
+
+def whiten(values):  #SOO: token level ICM
+    mean = torch.mean(values)
+    var = torch.var(values, unbiased=False)
+    return (values - mean) * torch.rsqrt(var + 1e-8)
+
 
 class ForwardModel(torch.nn.Module):
     '''
@@ -69,4 +77,5 @@ class ICM(torch.nn.Module):
 
     def icm_loss(self, next_state, next_state_hat):
         forward_model_loss = 0.5 * torch.sum((next_state_hat - next_state).norm(2, dim=-1)) / (len(next_state) + 1e-8)
+
         return forward_model_loss
