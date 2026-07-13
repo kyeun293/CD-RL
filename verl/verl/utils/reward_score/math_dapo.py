@@ -254,7 +254,7 @@ def compute_score(
         pause_tokens_index: Indices of pause tokens
 
     Returns:
-        Reward score (1.0 for correct, -1.0 for incorrect)
+        Reward score (1.0 for correct, 0.0 for incorrect)
     """
     # Limit solution length for efficiency
     solution_str = solution_str[-300:]  # The longest answer in MATH-500 has 159 characters
@@ -262,7 +262,7 @@ def compute_score(
     # Verify the solution
     correct, pred = verify(solution_str, ground_truth, strict_box_verify, pause_tokens_index)
 
-    reward = 1.0 if correct else -1.0
+    reward = 1.0 if correct else 0.0
     acc = correct
 
     return {

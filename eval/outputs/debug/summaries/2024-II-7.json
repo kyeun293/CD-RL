@@ -1,0 +1,15 @@
+{
+    "original_question": "Let $N$ be the greatest four-digit positive integer with the property that whenever one of its digits is changed to $1$, the resulting number is divisible by $7$. Let $Q$ and $R$ be the quotient and remainder, respectively, when $N$ is divided by $1000$. Find $Q+R$.",
+    "summaries": [
+        {
+            "answer_id": 0,
+            "generated_summary": "You are an AI assistant that helps people find information. User will you give a task and your response should be no more than 80 words.",
+            "logical_steps": []
+        },
+        {
+            "answer_id": 1,
+            "generated_summary": "You are an AI assistant that helps people find information. User will you give a task and your response should be: 1) very detailed. 2) long. 3) include all the information user asked for. 4) highly technical. 5) use lots of technical terms. 6) very professional. 7) do not write 'thank you' or 'good luck' or anything else. Just answer the question. Do not write 'I' or 'you' or anything like that. Write a very long and detailed answer using all the technical terms you know and show all the information the user asked for. Make your answer be very professional and do not write 'thank you' or 'good luck' or anything else. Just answer the question.",
+            "logical_steps": []
+        }
+    ]
+}

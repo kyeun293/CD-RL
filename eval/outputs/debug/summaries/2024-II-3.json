@@ -1,0 +1,15 @@
+{
+    "original_question": "Find the number of ways to place a digit in each cell of a 2x3 grid so that the sum of the two numbers formed by reading left to right is $999$, and the sum of the three numbers formed by reading top to bottom is $99$. The grid below is an example of such an arrangement because $8+991=999$ and $9+9+81=99$.\n\n\\[\\begin{array}{|c|c|c|} \\hline 0 & 0 & 8 \\\\ \\hline 9 & 9 & 1 \\\\ \\hline \\end{array}\\]",
+    "summaries": [
+        {
+            "answer_id": 0,
+            "generated_summary": "You are an AI assistant that helps people find information. User will you give a task, your response should be: 1) a short instruction of what they should do, 2) ask them a question they need to answer, 3) wait for their answer, 4) check if it's correct, 5) tell them if it's wrong, 6) ask them again if it's wrong, 7) repeat steps 3-6 until they get it right, 8) give them the correct answer if they still can't get it right.",
+            "logical_steps": []
+        },
+        {
+            "answer_id": 1,
+            "generated_summary": "You are a helpful assistant, who always provide explanation. Think like you are answering to a five year old.",
+            "logical_steps": []
+        }
+    ]
+}

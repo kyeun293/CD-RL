@@ -2,41 +2,33 @@
 set -xeuo pipefail
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
-# Ray logs + session files under your verl repo (override with env if needed)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERL_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-export RAY_TMPDIR="${RAY_TMPDIR:-${VERL_ROOT}/ray_tmp}"
-# Ray head stores sessions under ${RAY_TMPDIR}/ray; ray.init _temp_dir must match.
-export RAY_TEMP_DIR="${RAY_TEMP_DIR:-${RAY_TMPDIR}}"
-mkdir -p "${RAY_TMPDIR}" "${RAY_TEMP_DIR}"
-echo "[INFO] Ray temp/logs dir: ${RAY_TEMP_DIR}"
-echo "[INFO] Worker logs (after job starts): ${RAY_TEMP_DIR}/session_*/logs/"
 
-export CUDA_VISIBLE_DEVICES=1,2,3,5
+# Second Ray cluster (GPUs 4-7, port 8273)
+export RAY_TMPDIR="${VERL_ROOT}/ray_tmp2"
+export RAY_TEMP_DIR="${RAY_TMPDIR}"
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 export NCCL_SOCKET_NTHREADS=2
 export NCCL_NSOCKS_PERTHREAD=8
 export CUDA_DEVICE_MAX_CONNECTIONS=1
-# Default matches recipe/dapo/start_ray_local.sh (8272). Do NOT use 8266/8267 (shared clusters).
-export RAY_ADDRESS="${RAY_ADDRESS:-http://127.0.0.1:8272}"
-export RAY_API_SERVER_ADDRESS="${RAY_API_SERVER_ADDRESS:-${RAY_ADDRESS}}"
+export RAY_ADDRESS="http://127.0.0.1:8272"
+export RAY_API_SERVER_ADDRESS="${RAY_ADDRESS}"
+
 PYTHON_BIN="${PYTHON_BIN:-/home/soo/miniconda3/envs/cdrl/bin/python3}"
 RAY_BIN="${RAY_BIN:-$(dirname "${PYTHON_BIN}")/ray}"
+WORKING_DIR="${VERL_ROOT}"
+RUNTIME_ENV="${VERL_ROOT}/recipe/dapo/runtime_env.yaml"
+
 echo "[INFO] RAY_ADDRESS=${RAY_ADDRESS}"
-echo "[INFO] PYTHON_BIN=${PYTHON_BIN}"
-echo "[INFO] RAY_BIN=${RAY_BIN}"
+echo "[INFO] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 
-
-
-# ── Debug mode ──────────────────────────────────────────────────────────────
-# Set DEBUG=true to overfit on 32 fixed samples (1 batch) for fast iteration.
 DEBUG=${DEBUG:-false}
-# ────────────────────────────────────────────────────────────────────────────
 
 project_name='CDRL-DAPO-Qwen2.5-3B-Instruct'
-exp_name='CDRL-DAPO-Qwen2.5-3B-Instruct-1.7k_NEW_Normalize_PRM'
+exp_name='CDRL-DAPO-Qwen2.5-3B-Instruct-1.7k_subset_normalized'
 
 adv_estimator=grpo
-
 use_kl_in_reward=False
 kl_coef=0.0
 use_kl_loss=False
@@ -46,7 +38,7 @@ clip_ratio_high=0.28
 max_prompt_length=$((1024 * 2))
 max_response_length=$((1024 * 2))
 enable_overlong_buffer=True
-overlong_buffer_len=$((256))
+overlong_buffer_len=256
 overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
 enable_filter_groups=True
@@ -66,57 +58,25 @@ if [[ "${DEBUG}" == "true" ]]; then
     train_prompt_bsz=64
     gen_prompt_bsz=64
     train_prompt_mini_bsz=16
-    RESUME_MODE="disable"
-    RESUME_FROM_PATH=""
-    echo "[DEBUG] Overfit mode: 32 fixed samples, fresh start"
+    echo "[DEBUG] Overfit mode"
 fi
 
-# Ray (RAY_ADDRESS set above; do not override with 8266)
-PWD=./
-WORKING_DIR=${WORKING_DIR:-"${VERL_ROOT}"}
-RUNTIME_ENV=${RUNTIME_ENV:-"${VERL_ROOT}/recipe/dapo/runtime_env.yaml"}
+DATA_HOME_PATH="${DATA_HOME_PATH:-/mnt/sunwoo/data}"
+RAY_DATA_HOME="${RAY_DATA_HOME:-${HOME}/verl}"
+MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-3B-Instruct}"
+PRM_MODEL_PATH="${PRM_MODEL_PATH:-Qwen/Qwen2.5-Math-PRM-7B}"
+CKPTS_DIR="${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"
+TRAIN_FILE="${DATA_HOME_PATH}/dapo-1.7k.parquet"
+TEST_FILE="${DATA_HOME_PATH}/aime-2024.parquet"
 
-# Paths
-DATA_HOME_PATH=${DATA_HOME_PATH:-"/mnt/sunwoo/data"}
-RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
-MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen2.5-3B-Instruct"}
-PRM_MODEL_PATH=${PRM_MODEL_PATH:-"Qwen/Qwen2.5-Math-PRM-7B"}
-CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${DATA_HOME_PATH}/dapo-1.7k.parquet"}
-TEST_FILE=${TEST_FILE:-"${DATA_HOME_PATH}/aime-2024.parquet"}
+# Always fresh start for this new experiment
+RESUME_MODE="disable"
+RESUME_FROM_PATH=""
 
-# Resume: auto-detect latest checkpoint from latest_checkpointed_iteration.txt
-# Set FRESH_START=true to ignore checkpoints and start from step 0.
-FRESH_START=${FRESH_START:-true}
-LATEST_ITER_FILE="${CKPTS_DIR}/latest_checkpointed_iteration.txt"
-if [[ "${FRESH_START}" == "true" ]]; then
-    RESUME_MODE="disable"
-    RESUME_FROM_PATH=""
-    echo "[INFO] FRESH_START=true; ignoring checkpoints, starting from step 0"
-elif [[ -f "${LATEST_ITER_FILE}" ]]; then
-    LATEST_STEP=$(cat "${LATEST_ITER_FILE}")
-    RESUME_PATH="${CKPTS_DIR}/global_step_${LATEST_STEP}"
-    if [[ -d "${RESUME_PATH}" ]]; then
-        RESUME_MODE="resume_path"
-        RESUME_FROM_PATH="${RESUME_PATH}"
-        echo "[INFO] Resuming from latest checkpoint: ${RESUME_PATH}"
-    else
-        RESUME_MODE="disable"
-        RESUME_FROM_PATH=""
-        echo "[WARN] latest_checkpointed_iteration.txt points to ${RESUME_PATH} but dir not found; starting fresh"
-    fi
-else
-    RESUME_MODE="disable"
-    RESUME_FROM_PATH=""
-    echo "[INFO] No checkpoint found at ${CKPTS_DIR}; starting fresh"
-fi
-
-# Algorithm
 temperature=1.0
 top_p=1.0
-top_k=-1  # 0 for HF rollout, -1 for vLLM rollout
+top_k=-1
 
-# Performance Related Parameter
 sp_size=1
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
@@ -124,28 +84,19 @@ infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) * 2))
 offload=False
 gen_tp=2
 
-# curiosity 추가한 인자
-#[Sumwoo]
-#weight_overload = Ture/False # False: default
-#weight_overload_method =  "1epoch" "2epoch" "mixing" : overload policy--> ref every 1/2epoch /
-#percentage_of_mixing = 0.0 ~ 1.0 : mixing policy--> ref every x% of the total training steps
+# ICM settings
 use_curiosity=True
-overload_actor_to_ref=False
-overload_actor_to_ref_freq=100
+use_tokenlevel_curiosity=False
 STEP_SEP="Step"
 icm_intermediate_size=8192
 icm_lr=1e-4
 icm_lr_scheduler_type="linear"
 icm_warmup_steps=10
-icm_intrinsic_reward_token="last_step_token" # "last_step_token" or "all_step_tokens"
-icm_calculation="normalize_prm" # "clip" or "normalize" or "whiten" or "normalize_prm" or "whiten_prm"
+icm_intrinsic_reward_token="last_step_token"
+icm_calculation="normalize"
 icm_eta=0.5
-
-prm_mask=True  #SOO: PRM Modification, Default is True
-use_tokenlevel_curiosity=False  #SOO: token level ICM
-eta_token=0.04                  #SOO: token level ICM
-use_answerlevel_curiosity=False  #SOO: answer level ICM
-eta_answer=0.1                   #SOO: answer level ICM
+prm_mask=True
+eta_token=0.01
 
 "${RAY_BIN}" job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
@@ -165,8 +116,6 @@ eta_answer=0.1                   #SOO: answer level ICM
     algorithm.use_kl_in_reward=${use_kl_in_reward} \
     algorithm.kl_ctrl.kl_coef=${kl_coef} \
     algorithm.use_curiosity=${use_curiosity} \
-    algorithm.overload_actor_to_ref=${overload_actor_to_ref} \
-    algorithm.overload_actor_to_ref_freq=${overload_actor_to_ref_freq} \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
@@ -184,8 +133,6 @@ eta_answer=0.1                   #SOO: answer level ICM
     actor_rollout_ref.icm.prm_mask=${prm_mask} \
     algorithm.use_tokenlevel_curiosity=${use_tokenlevel_curiosity} \
     actor_rollout_ref.tokenlevel_icm.eta_token=${eta_token} \
-    algorithm.use_answerlevel_curiosity=${use_answerlevel_curiosity} \
-    actor_rollout_ref.answerlevel_icm.eta_answer=${eta_answer} \
     algorithm.filter_groups.enable=${enable_filter_groups} \
     algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
     algorithm.filter_groups.metric=${filter_groups_metric} \
@@ -244,10 +191,9 @@ eta_answer=0.1                   #SOO: answer level ICM
     trainer.val_before_train=True \
     trainer.test_freq=5 \
     trainer.save_freq=40 \
-    trainer.total_epochs=$([ "${DEBUG}" == "true" ] && echo 100 || echo 100) \
+    trainer.total_epochs=100 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=${RESUME_MODE} \
-    ${RESUME_FROM_PATH:+trainer.resume_from_path="${RESUME_FROM_PATH}"} \
     trainer.save_curiosity_scores=True \
     actor_rollout_ref.actor.entropy_checkpointing=True \
     actor_rollout_ref.ref.entropy_checkpointing=True \
@@ -257,4 +203,3 @@ eta_answer=0.1                   #SOO: answer level ICM
     actor_rollout_ref.ref.entropy_from_logits_with_chunking=True \
     +ray_kwargs.ray_init.include_dashboard=False \
     +ray_kwargs.ray_init._temp_dir=${RAY_TEMP_DIR}
-

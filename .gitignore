@@ -1,0 +1,24 @@
+# Ray runtime temp dirs (large)
+verl/ray_tmp/
+verl/ray_tmp2/
+
+# Large binary/wheel files
+*.whl
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Logs
+nohup.out
+
+# Sockets
+0
+cdrl
+
+# Experiment data / plots
+*.xlsx
+*.png
+
+# Egg info
+verl.egg-info/

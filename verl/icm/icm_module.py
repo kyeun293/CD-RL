@@ -1,4 +1,12 @@
 import torch
+import torch.nn.functional as F
+
+
+def whiten(values):  #SOO: token level ICM
+    mean = torch.mean(values)
+    var = torch.var(values, unbiased=False)
+    return (values - mean) * torch.rsqrt(var + 1e-8)
+
 
 class ForwardModel(torch.nn.Module):
     '''

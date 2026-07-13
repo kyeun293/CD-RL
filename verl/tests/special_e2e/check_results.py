@@ -23,7 +23,7 @@ def extract_reward_from_line(line):
         key_vals = line.split(" - ")
         for key_val in key_vals:
             key, val = key_val.split(":")
-            if key == "critic/rewards/mean":
+            if key == "critic/reward_total/mean":
                 reward = float(val)
                 return reward
         return -np.inf
