@@ -44,6 +44,7 @@ import torch
 import numpy as np
 
 from sampling import VLLMSampler
+from metrics.embedding_utils import embed_texts
 
 
 TENSOR_PARALLEL_SIZE = torch.cuda.device_count()
@@ -134,13 +135,23 @@ Before generating the final JSON, ensure your output strictly adheres to these c
 # JSON box extraction
 # ---------------------------------------------------------------------------
 
+# Judges often echo LaTeX (`\(`, `\)`, `\frac`, ...) verbatim inside JSON string
+# values; backslashes not followed by a legal JSON escape char make the whole
+# block unparseable. Double them up so `\(` -> `\\(` before retrying.
+_INVALID_JSON_ESCAPE = re.compile(r'\\(?!["\\/bfnrtu])')
+
+
+def _sanitize_json_escapes(json_str: str) -> str:
+    return _INVALID_JSON_ESCAPE.sub(r"\\\\", json_str)
+
+
 def extract_boxed_json(raw_text: str) -> dict:
     start_marker = "//boxed{"
     try:
         start_pos = raw_text.find(start_marker)
         if start_pos == -1:
             return {"error": "Delimiter //boxed{ not found in the output."}
- 
+
         json_start_pos = start_pos + len(start_marker)
         brace_level = 1
         for i in range(json_start_pos, len(raw_text)):
@@ -153,6 +164,10 @@ def extract_boxed_json(raw_text: str) -> dict:
                 json_str = raw_text[json_start_pos - 1: i + 1]
                 try:
                     return json.loads(json_str)
+                except json.JSONDecodeError:
+                    pass
+                try:
+                    return json.loads(_sanitize_json_escapes(json_str))
                 except json.JSONDecodeError as e:
                     return {"error": f"Failed to decode JSON: {e}",
                             "json_string": json_str}
@@ -220,29 +235,6 @@ def calculate_rpd_distance(summary_a: dict,
 # ---------------------------------------------------------------------------
 # Embeddings — OpenAI text-embedding-3-small, matching the paper
 # ---------------------------------------------------------------------------
-
-# 디버깅용 로컬 임베딩
-_ST_MODEL = None
-
-def _embed_local(texts, model: str):
-    global _ST_MODEL
-    from sentence_transformers import SentenceTransformer
-    import numpy as np
-
-    if _ST_MODEL is None or getattr(_ST_MODEL, "_name", None) != model:
-        _ST_MODEL = SentenceTransformer(model, trust_remote_code=True, 
-                                        model_kwargs={"device_map": "auto"},
-                                        device="cuda")
-        _ST_MODEL._name = model
-
-    arr = _ST_MODEL.encode(
-        list(texts),
-        batch_size=64,
-        convert_to_numpy=True,
-        normalize_embeddings=True,   # A @ B.T == cosine similarity
-        show_progress_bar=False,
-    ).astype(np.float32)
-    return arr
 
 # def _embed_openai(texts: Sequence[str], model: str) -> np.ndarray:
 #     """Batch-embed a list of strings. Requires OPENAI_API_KEY."""
@@ -370,14 +362,11 @@ class RPDScorer:
         if not texts_to_embed:
             return 0.0
         unique_texts = list(texts_to_embed)
-        embs = _embed_local(unique_texts, model=self.embedding_model)
+        embs = embed_texts(unique_texts, model=self.embedding_model)
         embeddings_dict = {t: e for t, e in zip(unique_texts, embs)}
- 
-        
-        # 디버깅용 로컬 임베딩으로 교체
+
         # embs = _embed_openai(flat, model=self.embedding_model)
-        # embs = _embed_local(flat, model=self.embedding_model)
-        
+
         # per_sample_embs = [
         #     embs[offsets[i]:offsets[i + 1]] for i in range(N)
         # ]
