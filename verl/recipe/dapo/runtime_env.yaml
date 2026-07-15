@@ -1,5 +1,12 @@
 working_dir: ./
-excludes: ["/.git/"]
+excludes:
+  - "/.git/"
+  - "/ray_tmp/"
+  - "/ray_tmp2/"
+  - "/models/"
+  - "/ckpts/"
+  - "/data/"
+  - "*.whl"
 env_vars:
   TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
   VLLM_USE_V1: "1"
