@@ -13,7 +13,7 @@ mkdir -p "${RAY_TMPDIR}" "${RAY_TEMP_DIR}"
 echo "[INFO] Ray temp/logs dir: ${RAY_TEMP_DIR}"
 echo "[INFO] Worker logs (after job starts): ${RAY_TEMP_DIR}/session_*/logs/"
 
-export CUDA_VISIBLE_DEVICES=1,2,3,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 export NCCL_SOCKET_NTHREADS=2
 export NCCL_NSOCKS_PERTHREAD=8
 export CUDA_DEVICE_MAX_CONNECTIONS=1
@@ -30,11 +30,11 @@ echo "[INFO] RAY_BIN=${RAY_BIN}"
 
 # ── Debug mode ──────────────────────────────────────────────────────────────
 # Set DEBUG=true to overfit on 32 fixed samples (1 batch) for fast iteration.
-DEBUG=${DEBUG:-false}
+DEBUG=${DEBUG:-False}
 # ────────────────────────────────────────────────────────────────────────────
 
 project_name='GRPO-baseline-Qwen3-4B-Base'
-exp_name='GRPO-baseline-Qwen3-4B-Base'
+exp_name='GRPO-baseline-Qwen3-4B-Base-1.7k'
 
 adv_estimator=grpo
 
@@ -57,16 +57,16 @@ max_num_gen_batches=0
 NNODES=1
 NGPUS_PER_NODE=4
 
-train_prompt_bsz=128
+train_prompt_bsz=32
 gen_prompt_bsz=$((train_prompt_bsz * 2))
 n_resp_per_prompt=6
-train_prompt_mini_bsz=32
+train_prompt_mini_bsz=8
 
 if [[ "${DEBUG}" == "true" ]]; then
     exp_name="${exp_name}-debug32"
-    train_prompt_bsz=64
-    gen_prompt_bsz=64
-    train_prompt_mini_bsz=16
+    train_prompt_bsz=32
+    gen_prompt_bsz=32
+    train_prompt_mini_bsz=8
     RESUME_MODE="disable"
     RESUME_FROM_PATH=""
     echo "[DEBUG] Overfit mode: 32 fixed samples, fresh start"
@@ -78,12 +78,13 @@ WORKING_DIR=${WORKING_DIR:-"${VERL_ROOT}"}
 RUNTIME_ENV=${RUNTIME_ENV:-"${VERL_ROOT}/recipe/dapo/runtime_env.yaml"}
 
 # Paths
-DATA_HOME_PATH=${DATA_HOME_PATH:-"/mnt/sunwoo/data"}
+DATA_HOME_PATH=${DATA_HOME_PATH:-"/mnt/psunwoo/data"}
+CKPT_HOME_PATH=${CKPT_HOME_PATH:-"/mnt/psunwoo/ckpts"}
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-4B-Base"}
 PRM_MODEL_PATH=${PRM_MODEL_PATH:-"Qwen/Qwen2.5-Math-PRM-7B"}
-CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${DATA_HOME_PATH}/dapo-math-17k.parquet"}
+CKPTS_DIR=${CKPTS_DIR:-"${CKPT_HOME_PATH}/${project_name}/${exp_name}"}
+TRAIN_FILE=${TRAIN_FILE:-"${DATA_HOME_PATH}/dapo-1.7k.parquet"}
 TEST_FILE=${TEST_FILE:-"${DATA_HOME_PATH}/aime-2024.parquet"}
 
 # Resume: auto-detect latest checkpoint from latest_checkpointed_iteration.txt
@@ -217,7 +218,7 @@ eta_answer=0.1                   #SOO: answer level ICM
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.3 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
