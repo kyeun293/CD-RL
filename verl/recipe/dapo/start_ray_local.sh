@@ -8,17 +8,22 @@ export RAY_TMPDIR="${RAY_TMPDIR:-${VERL_ROOT}/ray_tmp}"
 export RAY_TEMP_DIR="${RAY_TEMP_DIR:-${RAY_TMPDIR}}"
 mkdir -p "${RAY_TMPDIR}" "${RAY_TEMP_DIR}"
 
+# NOTE: 8272/6391/21000-21999 were this script's original "shouldn't conflict"
+# defaults, but other users on this shared box (e.g. psunwoo) run this same
+# script with the same defaults, so they collide in practice. These values are
+# yeeun's own picks, verified free with `ss -ltn` — if they ever collide again,
+# just override via env vars (e.g. RAY_DASHBOARD_PORT=... bash start_ray_local.sh).
 RAY_GCS_PORT="${RAY_GCS_PORT:-6391}"
-RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8272}"
+RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8290}"
 RAY_AGENT_LISTEN_PORT="${RAY_AGENT_LISTEN_PORT:-52400}"
 RAY_AGENT_GRPC_PORT="${RAY_AGENT_GRPC_PORT:-35792}"
 RAY_CLIENT_PORT="${RAY_CLIENT_PORT:-20001}"
-RAY_MIN_WORKER_PORT="${RAY_MIN_WORKER_PORT:-21000}"
-RAY_MAX_WORKER_PORT="${RAY_MAX_WORKER_PORT:-21999}"
+RAY_MIN_WORKER_PORT="${RAY_MIN_WORKER_PORT:-26000}"
+RAY_MAX_WORKER_PORT="${RAY_MAX_WORKER_PORT:-26999}"
 
 export RAY_ADDRESS="http://127.0.0.1:${RAY_DASHBOARD_PORT}"
 export RAY_API_SERVER_ADDRESS="${RAY_ADDRESS}"
-PYTHON_BIN="${PYTHON_BIN:-/home/soo/miniconda3/envs/cdrl/bin/python3}"
+PYTHON_BIN="${PYTHON_BIN:-/home/yeeun/miniconda3/envs/yeeun_cd/bin/python3}"
 
 echo "[INFO] Stopping any Ray processes owned by this user..."
 "${PYTHON_BIN}" -m ray.scripts.scripts stop --force 2>/dev/null || true

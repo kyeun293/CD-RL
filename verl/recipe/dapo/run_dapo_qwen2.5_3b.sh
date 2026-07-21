@@ -2,7 +2,7 @@
 set -xeuo pipefail
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export RAY_TMPDIR="/home/yeeun/ray_cd"
-export CUDA_VISIBLE_DEVICES=2,3,4,5
+export CUDA_VISIBLE_DEVICES=1,2,3,7
 export NCCL_SOCKET_NTHREADS=2
 export NCCL_NSOCKS_PERTHREAD=8
 export CUDA_DEVICE_MAX_CONNECTIONS=1

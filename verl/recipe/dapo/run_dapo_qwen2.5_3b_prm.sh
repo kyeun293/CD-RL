@@ -34,7 +34,11 @@ train_prompt_mini_bsz=32   #128
 
 # Ray
 PWD=./
-RAY_ADDRESS=${RAY_ADDRESS:-"auto"}
+# NOT "auto": this is a shared server with other users' Ray clusters running.
+# "auto" can silently attach to someone else's cluster. Always target our own
+# private cluster from start_ray_local.sh (dashboard port 8290 -- NOT 8272,
+# which is squatted by another user's long-running cluster on this box).
+RAY_ADDRESS=${RAY_ADDRESS:-"http://127.0.0.1:8290"}
 WORKING_DIR=${WORKING_DIR:-"/home/yeeun/CD-RL/verl"}
 RUNTIME_ENV=${RUNTIME_ENV:-"/home/yeeun/CD-RL/verl/recipe/dapo/runtime_env.yaml"}
 

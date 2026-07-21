@@ -38,9 +38,10 @@ def _sentence_bleu(candidate: Sequence[str], references: List[Sequence[str]], ma
     precisions = []
     for n in range(1, max_n + 1):
         cand_counts = _ngram_counts(candidate, n)
-        if not cand_counts:
-            precisions.append(0.0)
-            continue
+        # NOTE: when the candidate is shorter than n, cand_counts is empty
+        # and both clipped/total below are 0 — the add-1 smoothing formula
+        # naturally gives precision 1.0 (nothing to penalize) rather than a
+        # raw 0.0, which would blow up math.log() below.
         max_ref_counts = Counter()
         for ref in references:
             ref_counts = _ngram_counts(ref, n)

@@ -46,7 +46,7 @@ from metrics.distinct_equations import distinct_equations_score
 from metrics.rpd import RPDScorer
 from metrics.accuracy import check_samples, accuracy_summary
 from metrics.textual_diversity import textual_diversity_score
-from metrics.correct_clustering import ucc_at_k
+from metrics.correct_clustering import ucc_at_k, cluster_report
 from metrics.embedding_utils import embed_texts
 
 
@@ -178,6 +178,20 @@ def main():
                 per_question_embeddings=sample_embeddings,
             )
             print(f"[metric] UCC@{k} (mean clusters/question): {ucc_per_k[k]:.4f}")
+
+        # Per-question cluster assignments + a 2D PCA layout, at the largest
+        # k, for `visualize_clusters.py` (not needed for the UCC number itself).
+        clusters_dir = out_dir / "ucc_clusters"
+        clusters_dir.mkdir(parents=True, exist_ok=True)
+        report_k = max(ks)
+        for prob, samples, correct, embs in zip(problems, rollouts, correctness, sample_embeddings):
+            report = cluster_report(
+                samples, correct, report_k, args.embedding_model,
+                sim_threshold=args.ucc_sim_threshold, sample_embeddings=embs,
+            )
+            report["id"] = prob["id"]
+            safe_id = str(prob["id"]).replace("/", "_").replace(" ", "_")
+            (clusters_dir / f"{safe_id}.json").write_text(json.dumps(report, indent=2))
 
     # -------------------- 3d. Textual diversity (1 - Self-BLEU) ---------
     bleu_per_q = None

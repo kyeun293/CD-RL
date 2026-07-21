@@ -15,7 +15,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export RAY_ADDRESS="http://127.0.0.1:8272"
 export RAY_API_SERVER_ADDRESS="${RAY_ADDRESS}"
 
-PYTHON_BIN="${PYTHON_BIN:-/home/soo/miniconda3/envs/cdrl/bin/python3}"
+PYTHON_BIN="${PYTHON_BIN:-/home/yeeun/miniconda3/envs/yeeun_cd/bin/python3}"
 RAY_BIN="${RAY_BIN:-$(dirname "${PYTHON_BIN}")/ray}"
 WORKING_DIR="${VERL_ROOT}"
 RUNTIME_ENV="${VERL_ROOT}/recipe/dapo/runtime_env.yaml"

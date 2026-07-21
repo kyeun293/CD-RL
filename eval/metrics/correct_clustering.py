@@ -96,3 +96,61 @@ def ucc_at_k(
         clusters = correct_answer_clusters(samples, correct, k, embedding_model, sim_threshold, embs)
         counts.append(len(clusters))
     return sum(counts) / max(len(counts), 1)
+
+
+def pca_2d(embeddings: np.ndarray) -> np.ndarray:
+    """Project embeddings to 2D via SVD-based PCA, for visualization only."""
+    n = embeddings.shape[0]
+    if n == 0:
+        return np.zeros((0, 2), dtype=np.float32)
+    centered = embeddings - embeddings.mean(axis=0, keepdims=True)
+    if n == 1:
+        return np.zeros((1, 2), dtype=np.float32)
+    u, s, _ = np.linalg.svd(centered, full_matrices=False)
+    coords = (u * s)[:, :2]
+    if coords.shape[1] < 2:
+        coords = np.pad(coords, ((0, 0), (0, 2 - coords.shape[1])))
+    return coords.astype(np.float32)
+
+
+def cluster_report(
+    samples: Sequence[str],
+    correct: Sequence[bool],
+    k: int,
+    embedding_model: str,
+    sim_threshold: float = DEFAULT_SIM_THRESHOLD,
+    sample_embeddings: Optional[np.ndarray] = None,
+    text_preview_len: int = 300,
+) -> dict:
+    """Per-sample cluster assignment + a 2D PCA layout, for visualization.
+
+    Unlike `correct_answer_clusters` (correct-only), this reports every one
+    of the first k samples so a plot can show incorrect ones too (muted,
+    cluster=-1). `sample_embeddings`, if given, must cover all of `samples`.
+    """
+    samples_k = list(samples[:k])
+    correct_k = list(correct[:k])
+    if sample_embeddings is not None:
+        embs = np.asarray(sample_embeddings[:k])
+    else:
+        embs = embed_texts(samples_k, model=embedding_model)
+
+    clusters = correct_answer_clusters(samples_k, correct_k, k, embedding_model, sim_threshold, embs)
+    cluster_of = {i: cid for cid, members in enumerate(clusters) for i in members}
+    coords = pca_2d(embs)
+
+    return {
+        "k": k,
+        "num_clusters": len(clusters),
+        "samples": [
+            {
+                "index": i,
+                "correct": bool(correct_k[i]),
+                "cluster": cluster_of.get(i, -1),
+                "x": float(coords[i, 0]),
+                "y": float(coords[i, 1]),
+                "text": samples_k[i][:text_preview_len],
+            }
+            for i in range(k)
+        ],
+    }
