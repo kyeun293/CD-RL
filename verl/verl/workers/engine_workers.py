@@ -1560,6 +1560,40 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # print(f"actor_hidden_states[0] shape: {actor_hidden_states[0].shape}", flush=True) # step 수: torch.Size([5, 2048])
         # print(f"actor_hidden_states[1] shape: {actor_hidden_states[1].shape}", flush=True) # step 수: torch.Size([6, 2048])
 
+        # [CURIO-DEBUG] `_compute_icm` below builds pair_map from purely local
+        # positions (0..batch_size-1) in *this* `batch`. We reconstruct the global
+        # row index later as `idx + data_idx_offset`, which is only correct if this
+        # shard's rows are still in the same contiguous order they were dispatched
+        # in (global_indices == [offset, offset+1, ...]). If any of the preprocessing
+        # calls above silently reordered rows, this will catch it.
+        _gidx_now = batch.non_tensor_batch.get("global_indices", None)
+        if _gidx_now is None:
+            print(
+                f"[CURIO-DEBUG][WARN] rank={dist.get_rank()}: 'global_indices' missing "
+                f"from batch after curiosity preprocessing -- cannot verify row order.",
+                flush=True,
+            )
+        else:
+            _gidx_now = np.asarray(_gidx_now)
+            _expected = np.arange(data_idx_offset, data_idx_offset + batch_size)
+            if not np.array_equal(_gidx_now, _expected):
+                _bad = np.where(_gidx_now != _expected)[0]
+                print(
+                    f"[CURIO-DEBUG][BUG] rank={dist.get_rank()}: row order changed during "
+                    f"curiosity preprocessing! batch_size={batch_size} offset={data_idx_offset} "
+                    f"num_mismatched={len(_bad)}/{batch_size} "
+                    f"first_mismatch_positions={_bad[:10].tolist()} "
+                    f"expected_at_mismatch={_expected[_bad[:10]].tolist() if len(_bad) else []} "
+                    f"actual_at_mismatch={_gidx_now[_bad[:10]].tolist() if len(_bad) else []}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[CURIO-DEBUG][OK] rank={dist.get_rank()}: row order preserved through "
+                    f"curiosity preprocessing (batch_size={batch_size}, offset={data_idx_offset})",
+                    flush=True,
+                )
+
         # non-source rank: infer_batch collective ops에는 참여했지만 output이 없으므로 None 리턴
         # collect mechanism이 non-source rank의 None을 자동으로 걸러냄
         if "ref_hidden_states" not in batch.non_tensor_batch:
@@ -1595,6 +1629,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 "step_boundaries": step_boundaries,
                 "icm_loss": np.array([icm_loss_val] * batch_size, dtype=np.float32),
                 "parsed_steps": batch.non_tensor_batch["parsed_steps"],
+                # [CURIO-DEBUG] passthrough so the driver can verify the DP dispatch+gather
+                # round trip preserved row order end-to-end (see dapo_ray_trainer.py).
+                "global_indices": _gidx_now if _gidx_now is not None else np.arange(data_idx_offset, data_idx_offset + batch_size),
             }
         )
 

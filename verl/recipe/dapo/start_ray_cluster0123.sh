@@ -5,22 +5,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERL_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-export RAY_TMPDIR=/home/sunwoo/ray_tmp2
+export RAY_TMPDIR=/home/sunwoo/ray_tmp3
 export RAY_TEMP_DIR="${RAY_TMPDIR}"
 mkdir -p "${RAY_TMPDIR}" "${RAY_TMPDIR}/zmq"
 
-RAY_GCS_PORT=6392
-RAY_DASHBOARD_PORT=8273
-RAY_AGENT_LISTEN_PORT=52401
-RAY_AGENT_GRPC_PORT=35793
-RAY_CLIENT_PORT=20002
-RAY_MIN_WORKER_PORT=22000
-RAY_MAX_WORKER_PORT=22999
+RAY_GCS_PORT=6393
+RAY_DASHBOARD_PORT=8274
+RAY_AGENT_LISTEN_PORT=52403
+RAY_AGENT_GRPC_PORT=35794
+RAY_CLIENT_PORT=20003
+RAY_MIN_WORKER_PORT=23000
+RAY_MAX_WORKER_PORT=23999
 
-export CUDA_VISIBLE_DEVICES=4,5,6,7
+export CUDA_VISIBLE_DEVICES=0,1,2,3
 PYTHON_BIN="${PYTHON_BIN:-/home/sunwoo/miniconda3/envs/cdrl/bin/python3}"
 
-echo "[INFO] Starting second Ray head on GPUs 4,5,6,7 (dashboard: http://127.0.0.1:${RAY_DASHBOARD_PORT})"
+echo "[INFO] Starting second Ray head on GPUs 0,1,2,3 (dashboard: http://127.0.0.1:${RAY_DASHBOARD_PORT})"
 
 "${PYTHON_BIN}" -m ray.scripts.scripts start --head \
   --temp-dir="${RAY_TEMP_DIR}" \

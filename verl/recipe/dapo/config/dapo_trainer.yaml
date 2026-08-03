@@ -33,6 +33,21 @@ algorithm:
   use_curiosity: True
   use_tokenlevel_curiosity: False  #SOO: token level ICM
   use_answerlevel_curiosity: False  #SOO: answer level ICM
+  # Replace the fixed curiosity eta's (icm.eta / tokenlevel_icm.eta_token / answerlevel_icm.eta_answer)
+  # with a per-prompt-group eta derived from each group's rollout-correctness std.
+  # See RayDAPOTrainer._compute_curiosity_eta for details.
+  variance_gated_curiosity: False
+  # Multiplier applied on top of the dynamic (variance_gated_curiosity) eta, so that
+  # total_reward = extrinsic_reward + dynamic_eta_coefficient * dynamic_eta * intrinsic_reward.
+  # Only used when variance_gated_curiosity=True.
+  dynamic_eta_coefficient: 1.0
+  # Reshape the raw std-based dynamic eta with a saturating exponential transform before the
+  # dynamic_eta_coefficient multiplier is applied:
+  #   eta = x_max * (1 - exp(-dynamic_eta_beta * x / x_max)) / (1 - exp(-dynamic_eta_beta))
+  # where x is the raw per-group std (in [0, x_max], x_max = 0.5 for even rollout.n) and eta
+  # keeps f(0)=0, f(x_max)=x_max but rises toward x_max much faster for small-to-mid x. Larger
+  # beta => faster saturation. Set to 0 (or null) to disable and use the raw std unchanged.
+  dynamic_eta_beta: 5.0
   overload_actor_to_ref: False
   overload_actor_to_ref_freq: 40
 

@@ -6,7 +6,7 @@ export VLLM_WORKER_MULTIPROC_METHOD=spawn
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERL_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # export RAY_TMPDIR="${RAY_TMPDIR:-${VERL_ROOT}/ray_tmp}"
-export RAY_TMPDIR=/home/psunwoo/ray_tmp
+export RAY_TMPDIR=/home/sunwoo/ray_tmp3
 # Ray head stores sessions under ${RAY_TMPDIR}/ray; ray.init _temp_dir must match.
 export RAY_TEMP_DIR="${RAY_TEMP_DIR:-${RAY_TMPDIR}}"
 mkdir -p "${RAY_TMPDIR}" "${RAY_TEMP_DIR}"
@@ -18,9 +18,9 @@ export NCCL_SOCKET_NTHREADS=2
 export NCCL_NSOCKS_PERTHREAD=8
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 # Default matches recipe/dapo/start_ray_local.sh (8272). Do NOT use 8266/8267 (shared clusters).
-export RAY_ADDRESS="${RAY_ADDRESS:-http://127.0.0.1:8272}"
+export RAY_ADDRESS="${RAY_ADDRESS:-http://127.0.0.1:8274}"
 export RAY_API_SERVER_ADDRESS="${RAY_API_SERVER_ADDRESS:-${RAY_ADDRESS}}"
-PYTHON_BIN="${PYTHON_BIN:-/home/psunwoo/miniconda3/envs/cdrl/bin/python3}"
+PYTHON_BIN="${PYTHON_BIN:-/home/sunwoo/miniconda3/envs/cdrl/bin/python3}"
 RAY_BIN="${RAY_BIN:-$(dirname "${PYTHON_BIN}")/ray}"
 echo "[INFO] RAY_ADDRESS=${RAY_ADDRESS}"
 echo "[INFO] PYTHON_BIN=${PYTHON_BIN}"
@@ -33,8 +33,8 @@ echo "[INFO] RAY_BIN=${RAY_BIN}"
 DEBUG=${DEBUG:-false}
 # ────────────────────────────────────────────────────────────────────────────
 
-project_name='DAPO-baseline-Qwen3-4B-Base'
-exp_name='DAPO-baseline-Qwen3-4B-Base'
+project_name='CDRL-DAPO-Qwen3-4B-Base'
+exp_name='DAPO-stepcuriosity-dynamicEta-Qwen3-4B-Base-1.7k-expBeta-beta10.0'
 
 adv_estimator=grpo
 
@@ -64,9 +64,9 @@ train_prompt_mini_bsz=32
 
 if [[ "${DEBUG}" == "true" ]]; then
     exp_name="${exp_name}-debug32"
-    train_prompt_bsz=64
-    gen_prompt_bsz=64
-    train_prompt_mini_bsz=16
+    train_prompt_bsz=32
+    gen_prompt_bsz=32
+    train_prompt_mini_bsz=8
     RESUME_MODE="disable"
     RESUME_FROM_PATH=""
     echo "[DEBUG] Overfit mode: 32 fixed samples, fresh start"
@@ -75,11 +75,11 @@ fi
 # Ray (RAY_ADDRESS set above; do not override with 8266)
 PWD=./
 WORKING_DIR=${WORKING_DIR:-"${VERL_ROOT}"}
-RUNTIME_ENV=${RUNTIME_ENV:-"${VERL_ROOT}/recipe/dapo/runtime_env.yaml"}
+RUNTIME_ENV=${RUNTIME_ENV:-"${VERL_ROOT}/recipe/dapo/runtime_env_gpu0123.yaml"}
 
 # Paths
-DATA_HOME_PATH=${DATA_HOME_PATH:-"/mnt/psunwoo/data"}
-CKPT_HOME_PATH=${CKPT_HOME_PATH:-"/mnt/psunwoo/ckpts"}
+DATA_HOME_PATH=${DATA_HOME_PATH:-"${HOME}/data"}
+CKPT_HOME_PATH=${CKPT_HOME_PATH:-"${HOME}/ckpts"}
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-4B-Base"}
 PRM_MODEL_PATH=${PRM_MODEL_PATH:-"Qwen/Qwen2.5-Math-PRM-7B"}
@@ -89,7 +89,7 @@ TEST_FILE=${TEST_FILE:-"${DATA_HOME_PATH}/aime-2024.parquet"}
 
 # Resume: auto-detect latest checkpoint from latest_checkpointed_iteration.txt
 # Set FRESH_START=true to ignore checkpoints and start from step 0.
-FRESH_START=${FRESH_START:-true}
+FRESH_START=${FRESH_START:-false}
 LATEST_ITER_FILE="${CKPTS_DIR}/latest_checkpointed_iteration.txt"
 if [[ "${FRESH_START}" == "true" ]]; then
     RESUME_MODE="disable"
@@ -142,6 +142,9 @@ icm_warmup_steps=10
 icm_intrinsic_reward_token="last_step_token" # "last_step_token" or "all_step_tokens"
 icm_calculation="normalize_prm" # "clip" or "normalize" or "whiten" or "normalize_prm" or "whiten_prm"
 icm_eta=0.5
+variance_gated_curiosity=True  #SW: replace fixed icm_eta/eta_token/eta_answer with per-group rollout-correctness std
+dynamic_eta_coefficient=1.0  #SW: total_reward = extrinsic_reward + dynamic_eta_coefficient * dynamic_eta * intrinsic_reward
+dynamic_eta_beta=10.0  #SW: saturating exponential reshape of the raw std eta; 0/null disables it
 
 prm_mask=True  #SOO: PRM Modification, Default is True
 use_tokenlevel_curiosity=False  #SOO: token level ICM
@@ -184,6 +187,9 @@ eta_answer=0.1                   #SOO: answer level ICM
     actor_rollout_ref.icm.icm_calculation=${icm_calculation} \
     actor_rollout_ref.icm.eta=${icm_eta} \
     actor_rollout_ref.icm.prm_mask=${prm_mask} \
+    algorithm.variance_gated_curiosity=${variance_gated_curiosity} \
+    algorithm.dynamic_eta_coefficient=${dynamic_eta_coefficient} \
+    algorithm.dynamic_eta_beta=${dynamic_eta_beta} \
     algorithm.use_tokenlevel_curiosity=${use_tokenlevel_curiosity} \
     actor_rollout_ref.tokenlevel_icm.eta_token=${eta_token} \
     algorithm.use_answerlevel_curiosity=${use_answerlevel_curiosity} \
@@ -216,7 +222,7 @@ eta_answer=0.1                   #SOO: answer level ICM
     actor_rollout_ref.actor.grad_clip=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
     actor_rollout_ref.actor.ulysses_sequence_parallel_size=${sp_size} \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
