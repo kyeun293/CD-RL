@@ -30,27 +30,27 @@ echo "[INFO] RAY_BIN=${RAY_BIN}"
 
 # ── Debug mode ──────────────────────────────────────────────────────────────
 # Set DEBUG=true to overfit on 32 fixed samples (1 batch) for fast iteration.
-DEBUG=${DEBUG:-False}
+DEBUG=${DEBUG:-false}
 # ────────────────────────────────────────────────────────────────────────────
 
 project_name='CDRL-Qwen3-4B-Base-dapo17k'
-exp_name='GRPO-vanilla-Qwen3-4B-Base'
+exp_name='DAPO-stepCuriosity-Qwen3-4B-Base'
 
 adv_estimator=grpo
 
 use_kl_in_reward=False
 kl_coef=0.0
-use_kl_loss=True
-kl_loss_coef=0.001
+use_kl_loss=False
+kl_loss_coef=0.0
 clip_ratio_low=0.2
-clip_ratio_high=0.2
+clip_ratio_high=0.28
 max_prompt_length=$((2000))
 max_response_length=$((3000))
-enable_overlong_buffer=False
+enable_overlong_buffer=True
 overlong_buffer_len=$((256))
 overlong_penalty_factor=1.0
 loss_agg_mode="token-mean"
-enable_filter_groups=False
+enable_filter_groups=True
 filter_groups_metric=acc
 max_num_gen_batches=0
 
@@ -84,7 +84,7 @@ RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-4B-Base"}
 PRM_MODEL_PATH=${PRM_MODEL_PATH:-"Qwen/Qwen2.5-Math-PRM-7B"}
 CKPTS_DIR=${CKPTS_DIR:-"${CKPT_HOME_PATH}/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${DATA_HOME_PATH}/dapo-math-17k.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"${DATA_HOME_PATH}/dapo-math-17k-processed.parquet"}
 TEST_FILE=${TEST_FILE:-"${DATA_HOME_PATH}/aime-2024.parquet"}
 
 # Resume: auto-detect latest checkpoint from latest_checkpointed_iteration.txt
@@ -142,17 +142,15 @@ icm_warmup_steps=10
 icm_intrinsic_reward_token="last_step_token" # "last_step_token" or "all_step_tokens"
 icm_calculation="normalize_prm" # "clip" or "normalize" or "whiten" or "normalize_prm" or "whiten_prm"
 icm_eta=0.5
-variance_gated_curiosity=True  #SW: replace fixed icm_eta/eta_token/eta_answer with per-group rollout-correctness std
+variance_gated_curiosity=False  #SW: replace fixed icm_eta/eta_token/eta_answer with per-group rollout-correctness std
 dynamic_eta_coefficient=1.0  #SW: total_reward = extrinsic_reward + dynamic_eta_coefficient * dynamic_eta * intrinsic_reward
-dynamic_eta_beta=0.05  #SW: saturating exponential reshape of the raw std eta; 0/null disables it
+dynamic_eta_beta=10.0  #SW: saturating exponential reshape of the raw std eta; 0/null disables it
 
 prm_mask=True  #SOO: PRM Modification, Default is True
 use_tokenlevel_curiosity=False  #SOO: token level ICM
 eta_token=0.04                  #SOO: token level ICM
 use_answerlevel_curiosity=False  #SOO: answer level ICM
 eta_answer=0.1                   #SOO: answer level ICM
-
-# SW: Added trainer.validation_data_dir => validation 결과(response 포함) 체크포인트 저장
 
 "${RAY_BIN}" job submit --no-wait --runtime-env="${RUNTIME_ENV}" \
     --working-dir "${WORKING_DIR}" \
@@ -215,7 +213,7 @@ eta_answer=0.1                   #SOO: answer level ICM
     +actor_rollout_ref.model.override_config.resid_pdrop=0. \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.optim.lr_warmup_steps=10 \
+    actor_rollout_ref.actor.optim.lr_warmup_steps=20 \
     actor_rollout_ref.actor.optim.weight_decay=0.1 \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.fsdp_config.param_offload=${offload} \
@@ -232,7 +230,7 @@ eta_answer=0.1                   #SOO: answer level ICM
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k="${top_k}" \
     actor_rollout_ref.rollout.val_kwargs.temperature=${temperature} \
-    actor_rollout_ref.rollout.val_kwargs.top_p=${top_p} \
+    actor_rollout_ref.rollout.val_kwargs.top_p=0.7 \
     actor_rollout_ref.rollout.val_kwargs.top_k=${top_k} \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.n=1 \
@@ -254,9 +252,8 @@ eta_answer=0.1                   #SOO: answer level ICM
     trainer.val_before_train=True \
     trainer.test_freq=5 \
     trainer.save_freq=50 \
-    trainer.total_epochs=$([ "${DEBUG}" == "true" ] && echo 10 || echo 10) \
+    trainer.total_epochs=$([ "${DEBUG}" == "true" ] && echo 10 || echo 50) \
     trainer.default_local_dir="${CKPTS_DIR}" \
-    trainer.validation_data_dir="${CKPTS_DIR}" \
     trainer.resume_mode=${RESUME_MODE} \
     ${RESUME_FROM_PATH:+trainer.resume_from_path="${RESUME_FROM_PATH}"} \
     trainer.save_curiosity_scores=True \

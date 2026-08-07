@@ -1,6 +1,7 @@
 # Ray runtime temp dirs (large)
 verl/ray_tmp/
 verl/ray_tmp2/
+verl/ray_tmp3/
 
 # Large binary/wheel files
 *.whl

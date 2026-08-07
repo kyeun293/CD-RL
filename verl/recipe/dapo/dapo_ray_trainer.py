@@ -133,16 +133,23 @@ class RayDAPOTrainer(RayPPOTrainer):
         n = self.config.actor_rollout_ref.rollout.n
         # k only ranges over [0, n] within a group, so precompute the (at most n+1) possible
         # std values once instead of recomputing np.sqrt() per rollout.
-        std_table = {k: np.sqrt(k * (n - k)) / n for k in range(n + 1)}
-        x_max = max(std_table.values()) if std_table else 0.0
-        beta = self._dynamic_eta_beta
+        # std_table = {k: np.sqrt(k * (n - k)) / n for k in range(n + 1)}
+        # x_max = max(std_table.values()) if std_table else 0.0
+        # beta = self._dynamic_eta_beta
 
-        def saturate(x):
-            if not beta or x_max <= 0:
-                return x
-            return x_max * (1 - np.exp(-beta * x / x_max)) / (1 - np.exp(-beta))
+        # def saturate(x):
+        #     if not beta or x_max <= 0:
+        #     # [SW] round for DAPO    
+        #     #     return round(x, 1)
+        #     # return round(x_max * (1 - np.exp(-beta * x / x_max)) / (1 - np.exp(-beta)), 1)
+        #     # [SW] raw for GRPO    
+        #         return x
+        #     return x_max * (1 - np.exp(-beta * x / x_max)) / (1 - np.exp(-beta))
 
-        eta_table = {k: saturate(std) for k, std in std_table.items()}
+        # eta_table = {k: saturate(std) for k, std in std_table.items()}
+
+        # use std values as eta
+        eta_table = {k: np.sqrt(k * (n - k)) / n for k in range(n + 1)}
 
         uids = batch.non_tensor_batch["uid"]
         accs = batch.non_tensor_batch["acc"]
@@ -177,25 +184,40 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         # Debug: k -> eta lookup table (only ~n//2+1 distinct values, symmetric in k <-> n-k),
         # plus how many groups in this batch landed on each k, and the resulting per-row eta stats.
-        k_histogram = defaultdict(int)
-        for uid in group_k:
-            k_histogram[group_k[uid]] += 1
-        print(
-            f"[CURIO-DEBUG] variance_gated_curiosity eta_table (n={n}, beta={beta}): "
-            f"{ {k: round(v, 4) for k, v in eta_table.items()} }",
-            flush=True,
-        )
-        print(
-            f"[CURIO-DEBUG] group k-histogram (k=#correct out of n): "
-            f"{dict(sorted(k_histogram.items()))}",
-            flush=True,
-        )
-        print(
-            f"[CURIO-DEBUG] per-row eta: min={eta.min():.4f} mean={eta.mean():.4f} "
-            f"max={eta.max():.4f} zero_frac={(eta == 0).mean():.4f}",
-            flush=True,
-        )
-        return eta
+        # k_histogram = defaultdict(int)
+        # for uid in group_k:
+        #     k_histogram[group_k[uid]] += 1
+        # print(
+        #     f"[CURIO-DEBUG] variance_gated_curiosity eta_table (n={n}, beta={beta}): "
+        #     f"{ {k: round(v, 4) for k, v in eta_table.items()} }",
+        #     flush=True,
+        # )
+        # print(
+        #     f"[CURIO-DEBUG] group k-histogram (k=#correct out of n): "
+        #     f"{dict(sorted(k_histogram.items()))}",
+        #     flush=True,
+        # )
+        # print(
+        #     f"[CURIO-DEBUG] per-row eta: min={eta.min():.4f} mean={eta.mean():.4f} "
+        #     f"max={eta.max():.4f} zero_frac={(eta == 0).mean():.4f}",
+        #     flush=True,
+        # )
+
+        # # [CURIO-DEBUG] Per-problem detail: for the first 10 distinct groups in this
+        # # batch, print how many rollouts were correct (k/m) and the eta computed for
+        # # that group.
+        # sample_uids = list(dict.fromkeys(uids))[:10]
+        # sample_lines = []
+        # for j, uid in enumerate(sample_uids):
+        #     m, k = group_size[uid], group_k[uid]
+        #     row_idx = int(np.where(uids == uid)[0][0])
+        #     sample_lines.append(f"  [{j}] uid={uid[:8]} k={k}/{m} eta={eta[row_idx]:.4f}")
+        # print(
+        #     "[CURIO-DEBUG] sample groups (correct/total rollouts -> eta):\n" + "\n".join(sample_lines),
+        #     flush=True,
+        # )
+
+        # return eta
 
     def add_intrinsic_reward(self, batch, curiosity_result):
         """
@@ -239,6 +261,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                 eta_arr = self._compute_curiosity_eta(batch)
             else:
                 eta_arr = np.full(len(batch), self.config.actor_rollout_ref.icm.eta, dtype=np.float64)
+            # print(f"[CURIO-DEBUG] First 10 eta values: {eta_arr[:10]}", flush=True)
             reward_token = self.config.actor_rollout_ref.icm.intrinsic_reward_token
             icm_calculation = self.config.actor_rollout_ref.icm.icm_calculation
 
@@ -510,7 +533,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, "red"):
-                        print(f"[GEN-DEBUG] Generating responses", flush=True)
+                        # print(f"[GEN-DEBUG] Generating responses", flush=True)
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
                         
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
@@ -649,43 +672,43 @@ class RayDAPOTrainer(RayPPOTrainer):
                     # calculate curiosity score if needed
                     if self._use_curiosity:
                         with marked_timer("curiosity", timing_raw, "magenta"):
-                            print(f"[CURIO-DEBUG] Computing curiosity scores", flush=True)
+                            # print(f"[CURIO-DEBUG] Computing curiosity scores", flush=True)
                             batch_size =len(batch.batch)
                             batch.meta_info["step_sep"] = self._step_sep
                             batch.non_tensor_batch["global_indices"] = np.arange(batch_size)
                             curiosity_result = self.actor_rollout_wg.compute_curiosity(batch)
 
-                        # [CURIO-DEBUG] Verify the DP dispatch+gather round trip preserved row
-                        # order end-to-end. If this fails, `eta_arr[data_idx]` in
-                        # add_intrinsic_reward silently reads the wrong row's eta -- this is
-                        # the main suspect for why exp_beta (eta concentrated near 0.5) behaves
-                        # worse than vanilla despite eta_arr's own values looking correct.
-                        _returned_gidx = curiosity_result.non_tensor_batch.get("global_indices", None)
-                        if _returned_gidx is None:
-                            print(
-                                "[CURIO-DEBUG][WARN] curiosity_result missing 'global_indices' -- "
-                                "cannot verify DP gather order.",
-                                flush=True,
-                            )
-                        else:
-                            _returned_gidx = np.asarray(_returned_gidx)
-                            _expected_gidx = np.arange(len(batch))
-                            if not np.array_equal(_returned_gidx, _expected_gidx):
-                                _bad = np.where(_returned_gidx != _expected_gidx)[0]
-                                print(
-                                    f"[CURIO-DEBUG][BUG] compute_curiosity DP gather broke row order! "
-                                    f"batch_size={len(batch)} num_mismatched={len(_bad)} "
-                                    f"first_mismatch_positions={_bad[:10].tolist()} "
-                                    f"expected_at_mismatch={_expected_gidx[_bad[:10]].tolist() if len(_bad) else []} "
-                                    f"actual_at_mismatch={_returned_gidx[_bad[:10]].tolist() if len(_bad) else []}",
-                                    flush=True,
-                                )
-                            else:
-                                print(
-                                    f"[CURIO-DEBUG][OK] compute_curiosity row order verified "
-                                    f"end-to-end (batch_size={len(batch)})",
-                                    flush=True,
-                                )
+                        # # [CURIO-DEBUG] Verify the DP dispatch+gather round trip preserved row
+                        # # order end-to-end. If this fails, `eta_arr[data_idx]` in
+                        # # add_intrinsic_reward silently reads the wrong row's eta -- this is
+                        # # the main suspect for why exp_beta (eta concentrated near 0.5) behaves
+                        # # worse than vanilla despite eta_arr's own values looking correct.
+                        # _returned_gidx = curiosity_result.non_tensor_batch.get("global_indices", None)
+                        # if _returned_gidx is None:
+                        #     print(
+                        #         "[CURIO-DEBUG][WARN] curiosity_result missing 'global_indices' -- "
+                        #         "cannot verify DP gather order.",
+                        #         flush=True,
+                        #     )
+                        # else:
+                        #     _returned_gidx = np.asarray(_returned_gidx)
+                        #     _expected_gidx = np.arange(len(batch))
+                        #     if not np.array_equal(_returned_gidx, _expected_gidx):
+                        #         _bad = np.where(_returned_gidx != _expected_gidx)[0]
+                        #         print(
+                        #             f"[CURIO-DEBUG][BUG] compute_curiosity DP gather broke row order! "
+                        #             f"batch_size={len(batch)} num_mismatched={len(_bad)} "
+                        #             f"first_mismatch_positions={_bad[:10].tolist()} "
+                        #             f"expected_at_mismatch={_expected_gidx[_bad[:10]].tolist() if len(_bad) else []} "
+                        #             f"actual_at_mismatch={_returned_gidx[_bad[:10]].tolist() if len(_bad) else []}",
+                        #             flush=True,
+                        #         )
+                        #     else:
+                        #         print(
+                        #             f"[CURIO-DEBUG][OK] compute_curiosity row order verified "
+                        #             f"end-to-end (batch_size={len(batch)})",
+                        #             flush=True,
+                        #         )
 
                         batch.batch["ref_log_prob"] = curiosity_result.batch["ref_log_prob"]
                         metrics["train/icm_loss"] = curiosity_result.non_tensor_batch["icm_loss"].mean().item()
@@ -740,7 +763,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                     # token-level ICM (independent from step-level ICM)  #SOO: token level ICM
                     if self._use_tokenlevel_curiosity:
                         with marked_timer("tokenlevel_curiosity", timing_raw, "magenta"):
-                            print(f"[CURIO-DEBUG] Computing token-level curiosity scores", flush=True)
+                            # print(f"[CURIO-DEBUG] Computing token-level curiosity scores", flush=True)
                             tokenlevel_result = self.actor_rollout_wg.compute_tokenlevel_curiosity(batch)
                         metrics["train/tokenlevel_icm_loss"] = tokenlevel_result.non_tensor_batch["tokenlevel_icm_loss"].mean().item()
                         batch = self.add_tokenlevel_intrinsic_reward(batch, tokenlevel_result)
@@ -748,7 +771,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                     # answer-level ICM (only applied on correct answers)  #SOO: answer level ICM
                     if self._use_answerlevel_curiosity:
                         with marked_timer("answerlevel_curiosity", timing_raw, "magenta"):
-                            print(f"[CURIO-DEBUG] Computing answer-level curiosity scores", flush=True)
+                            # print(f"[CURIO-DEBUG] Computing answer-level curiosity scores", flush=True)
                             answerlevel_result = self.actor_rollout_wg.compute_answerlevel_curiosity(batch)
                         metrics["train/answerlevel_icm_loss"] = answerlevel_result.non_tensor_batch["answerlevel_icm_loss"].mean().item()
                         batch = self.add_answerlevel_intrinsic_reward(batch, answerlevel_result)

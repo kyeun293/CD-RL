@@ -938,8 +938,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     def _soo_debug_enabled(self) -> bool:
         if not torch.distributed.is_initialized():
-            return True
-        return torch.distributed.get_rank() == 0
+            return False
+        return False
 
     def _soo_debug_log(self, msg: str) -> None:
         if self._soo_debug_enabled():

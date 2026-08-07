@@ -84,7 +84,7 @@ RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 MODEL_PATH=${MODEL_PATH:-"Qwen/Qwen3-4B-Base"}
 PRM_MODEL_PATH=${PRM_MODEL_PATH:-"Qwen/Qwen2.5-Math-PRM-7B"}
 CKPTS_DIR=${CKPTS_DIR:-"${CKPT_HOME_PATH}/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${DATA_HOME_PATH}/dapo-math-17k.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"${DATA_HOME_PATH}/dapo-math-17k-processed.parquet"}
 TEST_FILE=${TEST_FILE:-"${DATA_HOME_PATH}/aime-2024.parquet"}
 
 # Resume: auto-detect latest checkpoint from latest_checkpointed_iteration.txt
