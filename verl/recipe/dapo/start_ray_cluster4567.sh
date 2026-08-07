@@ -5,9 +5,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERL_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-export RAY_TMPDIR="${VERL_ROOT}/ray_tmp2"
+export RAY_TMPDIR=/home/sunwoo/ray_tmp2
 export RAY_TEMP_DIR="${RAY_TMPDIR}"
-mkdir -p "${RAY_TMPDIR}"
+mkdir -p "${RAY_TMPDIR}" "${RAY_TMPDIR}/zmq"
 
 RAY_GCS_PORT=6392
 RAY_DASHBOARD_PORT=8273
@@ -18,7 +18,7 @@ RAY_MIN_WORKER_PORT=22000
 RAY_MAX_WORKER_PORT=22999
 
 export CUDA_VISIBLE_DEVICES=4,5,6,7
-PYTHON_BIN="${PYTHON_BIN:-/home/soo/miniconda3/envs/cdrl/bin/python3}"
+PYTHON_BIN="${PYTHON_BIN:-/home/sunwoo/miniconda3/envs/cdrl/bin/python3}"
 
 echo "[INFO] Starting second Ray head on GPUs 4,5,6,7 (dashboard: http://127.0.0.1:${RAY_DASHBOARD_PORT})"
 

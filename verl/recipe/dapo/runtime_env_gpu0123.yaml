@@ -13,6 +13,6 @@ env_vars:
   TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
   VLLM_USE_V1: "1"
   PATH: "/home/sunwoo/miniconda3/envs/cdrl/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-  CUDA_VISIBLE_DEVICES: "4,5,6,7"
+  CUDA_VISIBLE_DEVICES: "0,1,2,3"
   RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES: "1"
-  VERL_ZMQ_DIR: "/home/sunwoo/ray_tmp2/zmq"
+  VERL_ZMQ_DIR: "/home/sunwoo/ray_tmp3/zmq"

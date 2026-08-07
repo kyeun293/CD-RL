@@ -57,11 +57,23 @@ class RayDAPOTrainer(RayPPOTrainer):
         self.save_curiosity_scores = self.config.trainer.get("save_curiosity_scores", False)
         self._use_tokenlevel_curiosity = self.config.algorithm.get("use_tokenlevel_curiosity", False)  #SOO: token level ICM
         self._use_answerlevel_curiosity = self.config.algorithm.get("use_answerlevel_curiosity", False)  #SOO: answer level ICM
+        # When True, all curiosity eta's are replaced by a per-prompt-group eta derived
+        # from the std of rollout correctness within that group (see _compute_curiosity_eta).
+        self._variance_gated_curiosity = self.config.algorithm.get("variance_gated_curiosity", False)
+        # Multiplier applied on top of the dynamic (variance-gated) eta, so that
+        # total_reward = extrinsic_reward + dynamic_eta_coefficient * dynamic_eta * intrinsic_reward.
+        self._dynamic_eta_coefficient = self.config.algorithm.get("dynamic_eta_coefficient", 1.0)
+        # Reshapes the raw std-based dynamic eta with a saturating exponential curve before the
+        # coefficient above is applied (see _compute_curiosity_eta). 0/None disables the reshape.
+        self._dynamic_eta_beta = self.config.algorithm.get("dynamic_eta_beta", 5.0)
         print(f"[INIT-DEBUG] use_curiosity: {self._use_curiosity}", flush=True)
         print(f"[INIT-DEBUG] step_sep: {repr(self._step_sep)}", flush=True)
         print(f"[INIT-DEBUG] save_curiosity_scores: {self.save_curiosity_scores}", flush=True)
         print(f"[INIT-DEBUG] use_tokenlevel_curiosity: {self._use_tokenlevel_curiosity}", flush=True)
         print(f"[INIT-DEBUG] use_answerlevel_curiosity: {self._use_answerlevel_curiosity}", flush=True)
+        print(f"[INIT-DEBUG] variance_gated_curiosity: {self._variance_gated_curiosity}", flush=True)
+        print(f"[INIT-DEBUG] dynamic_eta_coefficient: {self._dynamic_eta_coefficient}", flush=True)
+        print(f"[INIT-DEBUG] dynamic_eta_beta: {self._dynamic_eta_beta}", flush=True)
 
     def compute_kl_related_metrics(self, batch: DataProto, metrics: dict, timing_raw: dict):
         batch.batch["response_mask"] = compute_response_mask(batch)
@@ -96,6 +108,117 @@ class RayDAPOTrainer(RayPPOTrainer):
 
         return batch
     
+    def _compute_curiosity_eta(self, batch):
+        """
+        Per-prompt-group eta, replacing the fixed config eta when variance_gated_curiosity=True.
+
+        Rollouts sharing the same "uid" are the `rollout.n` samples generated for the same
+        prompt. Let k = number of correct rollouts in that group (out of n = group size). The
+        raw signal is the population standard deviation of the group's 0/1 correctness values:
+            std = sqrt(k * (n - k)) / n     # == sqrt(p * (1 - p)) with p = k / n
+        This is 0 for a degenerate group (all-correct or all-wrong -- GRPO's "0000000" /
+        "1111111" case, where curiosity gets no useful signal) and reaches its maximum of
+        x_max = 0.5 (for even n) when the group is split evenly (k == n/2) -- the old fixed
+        default of `icm.eta: 0.5`.
+
+        Rather than using `std` directly, it's reshaped through a saturating exponential curve
+        (see algorithm.dynamic_eta_beta in dapo_trainer.yaml) that keeps f(0) = 0 and
+        f(x_max) = x_max but rises toward x_max much faster for small-to-mid std, so
+        already-mixed groups get close to the max curiosity weight instead of a linear share:
+            eta = x_max * (1 - exp(-beta * std / x_max)) / (1 - exp(-beta))
+        beta<=0 (or None) disables the reshape and eta falls back to the raw std.
+
+        Returns a (len(batch),) numpy array, row-aligned with `batch`.
+        """
+        n = self.config.actor_rollout_ref.rollout.n
+        # k only ranges over [0, n] within a group, so precompute the (at most n+1) possible
+        # std values once instead of recomputing np.sqrt() per rollout.
+        # std_table = {k: np.sqrt(k * (n - k)) / n for k in range(n + 1)}
+        # x_max = max(std_table.values()) if std_table else 0.0
+        # beta = self._dynamic_eta_beta
+
+        # def saturate(x):
+        #     if not beta or x_max <= 0:
+        #     # [SW] round for DAPO    
+        #     #     return round(x, 1)
+        #     # return round(x_max * (1 - np.exp(-beta * x / x_max)) / (1 - np.exp(-beta)), 1)
+        #     # [SW] raw for GRPO    
+        #         return x
+        #     return x_max * (1 - np.exp(-beta * x / x_max)) / (1 - np.exp(-beta))
+
+        # eta_table = {k: saturate(std) for k, std in std_table.items()}
+
+        # use std values as eta
+        eta_table = {k: np.sqrt(k * (n - k)) / n for k in range(n + 1)}
+
+        uids = batch.non_tensor_batch["uid"]
+        accs = batch.non_tensor_batch["acc"]
+        group_k = defaultdict(int)
+        group_size = defaultdict(int)
+        for uid, acc in zip(uids, accs, strict=True):
+            group_k[uid] += int(bool(acc))
+            group_size[uid] += 1
+
+        eta = np.empty(len(batch), dtype=np.float64)
+        for i, uid in enumerate(uids):
+            m, k = group_size[uid], group_k[uid]
+            if m == n:
+                eta[i] = eta_table[k]
+            else:
+                # Group size deviates from the configured rollout.n (e.g. a dynamic-sampling
+                # batch) -- fall back to computing the std directly for that group.
+                std = np.sqrt(k * (m - k)) / m if m > 0 else 0.0
+                eta[i] = saturate(std)
+
+        # Scale the dynamic eta by the configured coefficient, so that
+        # total_reward = extrinsic_reward + dynamic_eta_coefficient * dynamic_eta * intrinsic_reward.
+        eta = eta * self._dynamic_eta_coefficient
+
+        wandb.log(
+            {
+                "curiosity/group_eta_mean": float(eta.mean()),
+                "curiosity/group_eta_zero_frac": float((eta == 0).mean()),
+            },
+            step=self.global_steps,
+        )
+
+        # Debug: k -> eta lookup table (only ~n//2+1 distinct values, symmetric in k <-> n-k),
+        # plus how many groups in this batch landed on each k, and the resulting per-row eta stats.
+        # k_histogram = defaultdict(int)
+        # for uid in group_k:
+        #     k_histogram[group_k[uid]] += 1
+        # print(
+        #     f"[CURIO-DEBUG] variance_gated_curiosity eta_table (n={n}, beta={beta}): "
+        #     f"{ {k: round(v, 4) for k, v in eta_table.items()} }",
+        #     flush=True,
+        # )
+        # print(
+        #     f"[CURIO-DEBUG] group k-histogram (k=#correct out of n): "
+        #     f"{dict(sorted(k_histogram.items()))}",
+        #     flush=True,
+        # )
+        # print(
+        #     f"[CURIO-DEBUG] per-row eta: min={eta.min():.4f} mean={eta.mean():.4f} "
+        #     f"max={eta.max():.4f} zero_frac={(eta == 0).mean():.4f}",
+        #     flush=True,
+        # )
+
+        # # [CURIO-DEBUG] Per-problem detail: for the first 10 distinct groups in this
+        # # batch, print how many rollouts were correct (k/m) and the eta computed for
+        # # that group.
+        # sample_uids = list(dict.fromkeys(uids))[:10]
+        # sample_lines = []
+        # for j, uid in enumerate(sample_uids):
+        #     m, k = group_size[uid], group_k[uid]
+        #     row_idx = int(np.where(uids == uid)[0][0])
+        #     sample_lines.append(f"  [{j}] uid={uid[:8]} k={k}/{m} eta={eta[row_idx]:.4f}")
+        # print(
+        #     "[CURIO-DEBUG] sample groups (correct/total rollouts -> eta):\n" + "\n".join(sample_lines),
+        #     flush=True,
+        # )
+
+        # return eta
+
     def add_intrinsic_reward(self, batch, curiosity_result):
         """
         batch: DataProto
@@ -132,7 +255,13 @@ class RayDAPOTrainer(RayPPOTrainer):
         scaled_vals = []
         if raw_vals:
             raw_arr = np.array(raw_vals)
-            eta = self.config.actor_rollout_ref.icm.eta
+            if self._variance_gated_curiosity:
+                # Per-row eta driven by that row's prompt-group correctness variance,
+                # instead of the single fixed icm.eta value.
+                eta_arr = self._compute_curiosity_eta(batch)
+            else:
+                eta_arr = np.full(len(batch), self.config.actor_rollout_ref.icm.eta, dtype=np.float64)
+            # print(f"[CURIO-DEBUG] First 10 eta values: {eta_arr[:10]}", flush=True)
             reward_token = self.config.actor_rollout_ref.icm.intrinsic_reward_token
             icm_calculation = self.config.actor_rollout_ref.icm.icm_calculation
 
@@ -164,6 +293,7 @@ class RayDAPOTrainer(RayPPOTrainer):
 
             for k, ((data_idx, start, end, prm_label), raw) in enumerate(zip(entries, raw_vals)):
                 #SOO: clip, normalize, whiten, or normalize_prm of icm.
+                eta = eta_arr[data_idx]  # SW: this row's (group's) eta
                 if icm_calculation == "clip":
                     scaled = float(eta * np.clip(raw, 0.0, 1.0))
                 elif icm_calculation == "normalize":
@@ -207,8 +337,17 @@ class RayDAPOTrainer(RayPPOTrainer):
         Follows CD-RLHF: rewards[j, start:ends[j]] += eta * intrinsic_reward[j, :ends[j]-start]
         """
         intrinsic_rewards = tokenlevel_result.batch["tokenlevel_intrinsic_rewards"]  # (B, max_resp_len)
-        eta_token = self.config.actor_rollout_ref.tokenlevel_icm.eta_token
         response_mask = batch.batch["response_mask"].float()  # (B, max_resp_len)
+
+        if self._variance_gated_curiosity:
+            # Per-row eta driven by that row's prompt-group correctness variance,
+            # instead of the single fixed eta_token value. (B,) -> (B, 1) to broadcast
+            # over the token dimension.
+            eta_token = torch.tensor(
+                self._compute_curiosity_eta(batch), dtype=intrinsic_rewards.dtype, device=intrinsic_rewards.device
+            ).unsqueeze(-1)
+        else:
+            eta_token = self.config.actor_rollout_ref.tokenlevel_icm.eta_token
 
         batch.batch["token_level_rewards"] += eta_token * intrinsic_rewards * response_mask
 
@@ -226,7 +365,15 @@ class RayDAPOTrainer(RayPPOTrainer):
         only for sequences where the extrinsic reward is positive (correct answer).
         """
         intrinsic_rewards = answerlevel_result.batch["answerlevel_intrinsic_rewards"]  # (B,)
-        eta_answer = self.config.actor_rollout_ref.answerlevel_icm.eta_answer
+
+        if self._variance_gated_curiosity:
+            # Per-row eta driven by that row's prompt-group correctness variance,
+            # instead of the single fixed eta_answer value.
+            eta_answer = torch.tensor(
+                self._compute_curiosity_eta(batch), dtype=intrinsic_rewards.dtype, device=intrinsic_rewards.device
+            )
+        else:
+            eta_answer = self.config.actor_rollout_ref.answerlevel_icm.eta_answer
 
         # correctness mask: sequences with positive extrinsic reward
         seq_scores = batch.batch["token_level_scores"].sum(dim=-1)  # (B,)
@@ -386,7 +533,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                 with marked_timer("step", timing_raw):
                     # generate a batch
                     with marked_timer("gen", timing_raw, "red"):
-                        print(f"[GEN-DEBUG] Generating responses", flush=True)
+                        # print(f"[GEN-DEBUG] Generating responses", flush=True)
                         gen_batch_output = self.async_rollout_manager.generate_sequences(gen_batch_output)
 
                     if "timing" in gen_batch_output.meta_info:
@@ -456,7 +603,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 kl_metrics
                             )  # TODO: This will be cleared if we use multiple genenration batches
                         else:
-                            new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"]
+                            new_batch.batch["token_level_rewards"] = new_batch.batch["token_level_scores"].clone()
 
                     if not self.config.algorithm.filter_groups.enable:
                         batch = new_batch
@@ -528,11 +675,43 @@ class RayDAPOTrainer(RayPPOTrainer):
                     # calculate curiosity score if needed
                     if self._use_curiosity:
                         with marked_timer("curiosity", timing_raw, "magenta"):
-                            print(f"[CURIO-DEBUG] Computing curiosity scores", flush=True)
+                            # print(f"[CURIO-DEBUG] Computing curiosity scores", flush=True)
                             batch_size =len(batch.batch)
                             batch.meta_info["step_sep"] = self._step_sep
                             batch.non_tensor_batch["global_indices"] = np.arange(batch_size)
-                            curiosity_result = self.actor_rollout_wg.compute_curiosity(batch)  
+                            curiosity_result = self.actor_rollout_wg.compute_curiosity(batch)
+
+                        # # [CURIO-DEBUG] Verify the DP dispatch+gather round trip preserved row
+                        # # order end-to-end. If this fails, `eta_arr[data_idx]` in
+                        # # add_intrinsic_reward silently reads the wrong row's eta -- this is
+                        # # the main suspect for why exp_beta (eta concentrated near 0.5) behaves
+                        # # worse than vanilla despite eta_arr's own values looking correct.
+                        # _returned_gidx = curiosity_result.non_tensor_batch.get("global_indices", None)
+                        # if _returned_gidx is None:
+                        #     print(
+                        #         "[CURIO-DEBUG][WARN] curiosity_result missing 'global_indices' -- "
+                        #         "cannot verify DP gather order.",
+                        #         flush=True,
+                        #     )
+                        # else:
+                        #     _returned_gidx = np.asarray(_returned_gidx)
+                        #     _expected_gidx = np.arange(len(batch))
+                        #     if not np.array_equal(_returned_gidx, _expected_gidx):
+                        #         _bad = np.where(_returned_gidx != _expected_gidx)[0]
+                        #         print(
+                        #             f"[CURIO-DEBUG][BUG] compute_curiosity DP gather broke row order! "
+                        #             f"batch_size={len(batch)} num_mismatched={len(_bad)} "
+                        #             f"first_mismatch_positions={_bad[:10].tolist()} "
+                        #             f"expected_at_mismatch={_expected_gidx[_bad[:10]].tolist() if len(_bad) else []} "
+                        #             f"actual_at_mismatch={_returned_gidx[_bad[:10]].tolist() if len(_bad) else []}",
+                        #             flush=True,
+                        #         )
+                        #     else:
+                        #         print(
+                        #             f"[CURIO-DEBUG][OK] compute_curiosity row order verified "
+                        #             f"end-to-end (batch_size={len(batch)})",
+                        #             flush=True,
+                        #         )
 
                         batch.batch["ref_log_prob"] = curiosity_result.batch["ref_log_prob"]
                         metrics["train/icm_loss"] = curiosity_result.non_tensor_batch["icm_loss"].mean().item()
@@ -587,7 +766,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                     # token-level ICM (independent from step-level ICM)  #SOO: token level ICM
                     if self._use_tokenlevel_curiosity:
                         with marked_timer("tokenlevel_curiosity", timing_raw, "magenta"):
-                            print(f"[CURIO-DEBUG] Computing token-level curiosity scores", flush=True)
+                            # print(f"[CURIO-DEBUG] Computing token-level curiosity scores", flush=True)
                             tokenlevel_result = self.actor_rollout_wg.compute_tokenlevel_curiosity(batch)
                         metrics["train/tokenlevel_icm_loss"] = tokenlevel_result.non_tensor_batch["tokenlevel_icm_loss"].mean().item()
                         batch = self.add_tokenlevel_intrinsic_reward(batch, tokenlevel_result)
@@ -595,7 +774,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                     # answer-level ICM (only applied on correct answers)  #SOO: answer level ICM
                     if self._use_answerlevel_curiosity:
                         with marked_timer("answerlevel_curiosity", timing_raw, "magenta"):
-                            print(f"[CURIO-DEBUG] Computing answer-level curiosity scores", flush=True)
+                            # print(f"[CURIO-DEBUG] Computing answer-level curiosity scores", flush=True)
                             answerlevel_result = self.actor_rollout_wg.compute_answerlevel_curiosity(batch)
                         metrics["train/answerlevel_icm_loss"] = answerlevel_result.non_tensor_batch["answerlevel_icm_loss"].mean().item()
                         batch = self.add_answerlevel_intrinsic_reward(batch, answerlevel_result)
