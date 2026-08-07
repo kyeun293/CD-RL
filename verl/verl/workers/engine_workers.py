@@ -1063,6 +1063,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         ### self.ref: reference model   
         output = self.ref.infer_batch(batch_td)
 
+        if output is None:
+            torch.cuda.empty_cache()
+            return batch
+
         log_probs = tu.get(output, "log_probs", default=None)
         log_probs = no_padding_2_padding(log_probs, batch_td)
         batch.batch["ref_log_prob"] = log_probs.float()
@@ -1070,7 +1074,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         ref_hidden_states_raw = tu.get(output, "hidden_states", default=None)
         ref_hidden_states_raw = no_padding_2_padding(ref_hidden_states_raw, batch_td, is_hidden_states=True)
         batch.meta_info["output_hidden_states"] = False
-        # print(f"[REF-HS-DEBUG] ref_hidden_states_raw shape: {ref_hidden_states_raw.shape}", flush=True)
 
         step_boundaries = batch.non_tensor_batch["step_boundaries"]
 
@@ -1090,7 +1093,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         del ref_hidden_states_raw, ref_hidden_states
         del log_probs
         torch.cuda.empty_cache()
-        
+
         return batch
 
     def _compute_actor_hidden_states(self, batch: DataProto) -> torch.Tensor:
@@ -1103,10 +1106,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         
         ### self.actor: actor model
         output = self.actor.infer_batch(batch_td)
-        
+
+        if output is None:
+            return None
+
         hidden_states = tu.get(output, "hidden_states", default=None)
-        assert hidden_states is not None, "output_hidden_states=True 설정 필요"
-        
+        # assert hidden_states is not None, "output_hidden_states=True 설정 필요"
         return hidden_states  # (batch_size, seq_len, hidden_dim)
 
     def _get_actor_hidden_states_chunk(self, token_ids_list: list[torch.Tensor]) -> list[torch.Tensor]:
@@ -1157,6 +1162,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         step_hidden_states = self._compute_actor_hidden_states(step_batch)
 
+        if step_hidden_states is None:
+            return None
+
         # 각 step의 마지막 토큰의 hidden state만 추출
         step_last_hidden_states = [
             step_hidden_states[i, response_mask[i].sum() - 1]
@@ -1185,8 +1193,15 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 step_tokens = response_sample[start:end]
                 all_steps.append(step_tokens)
                 step_map.append((idx, step_idx))
+        
+        # step 얼마나 들어오는지 확인
+        print(f"[CHUNK-DEBUG] all_steps count: {len(all_steps)}", flush=True)
 
         all_hidden_states = self._get_actor_hidden_states_chunk(all_steps)
+
+        if all_hidden_states is None:
+            return batch
+
         step_last_hidden_states = [[] for _ in range(batch_size)]
         for i, hidden_state in enumerate(all_hidden_states):
             resp_idx, step_idx = step_map[i]
@@ -1497,13 +1512,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     def compute_curiosity(self, batch):
-        # current_device = getattr(self, 'device', next(self.icm.parameters()).device)
-        # expected_dtype = next(self.icm.parameters()).dtype
+        # 시작 시점 메모리 확인
+        if dist.get_rank() == 0:
+            print(f"[MEM] before curiosity: {torch.cuda.memory_allocated()/1e9:.1f}GB / {torch.cuda.memory_reserved()/1e9:.1f}GB", flush=True)
 
-        # print(f"[ICM] pid={os.getpid()}, expected device={current_device}, dtype={expected_dtype}")
-        # for name, param in self.icm.named_parameters():
-        #     print(f"[ICM PARAM] {name}: {param.device}, {param.dtype}")
-                      
+
         # offset 계산
         global_indices = batch.non_tensor_batch["global_indices"]
         data_idx_offset = int(global_indices[0])
@@ -1545,6 +1558,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # print(f"actor_hidden_states len: {len(actor_hidden_states)}", flush=True) # batch size = 32개 데이터
         # print(f"actor_hidden_states[0] shape: {actor_hidden_states[0].shape}", flush=True) # step 수: torch.Size([5, 2048])
         # print(f"actor_hidden_states[1] shape: {actor_hidden_states[1].shape}", flush=True) # step 수: torch.Size([6, 2048])
+
+        # non-source rank: infer_batch collective ops에는 참여했지만 output이 없으므로 None 리턴
+        # collect mechanism이 non-source rank의 None을 자동으로 걸러냄
+        if "ref_hidden_states" not in batch.non_tensor_batch:
+            return None
 
         # print(f"[ICM-DEBUG] Computing ICM intrinsic rewards", flush=True)
 

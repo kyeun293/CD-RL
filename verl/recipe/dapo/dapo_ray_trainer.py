@@ -249,6 +249,40 @@ class RayDAPOTrainer(RayPPOTrainer):
         }, step=self.global_steps)
         return batch
 
+    def _compute_dedup_factor(self) -> int:
+        """Detect how many times each unique problem is duplicated in train_dataset.
+
+        Datasets like dapo-math-17k are pre-duplicated (e.g. 100x) so that a single
+        configured epoch already sweeps the unique problems many times over. Wallclock
+        cost should be measured against real (unique-data) epochs, not nominal ones.
+        """
+        try:
+            indices = [
+                ei.get("index") for ei in self.train_dataset.dataframe["extra_info"] if isinstance(ei, dict)
+            ]
+            indices = [idx for idx in indices if idx is not None]
+            if not indices:
+                return 1
+            factor = round(len(indices) / len(set(indices)))
+            return max(factor, 1)
+        except Exception as e:
+            print(f"[REAL-EPOCH] could not detect dataset dedup factor, defaulting to 1: {e}")
+            return 1
+
+    def _log_real_epoch_summary(self):
+        durations = getattr(self, "_real_epoch_durations", [])
+        if not durations:
+            print("[REAL-EPOCH] no full real epoch was completed during this run")
+            return
+        steady_state = durations[1:] if len(durations) > 1 else durations
+        avg = sum(steady_state) / len(steady_state)
+        print(
+            f"[REAL-EPOCH] completed {len(durations)} real epoch(s) "
+            f"(dedup_factor={self.dedup_factor}, steps_per_real_epoch={self.steps_per_real_epoch:.2f}); "
+            f"avg wallclock/epoch = {avg:.1f}s"
+            + (" (first epoch excluded as warmup)" if len(durations) > 1 else " (only the first epoch ran)")
+        )
+
     def fit(self):
         """
         The training loop of PPO.
@@ -311,6 +345,20 @@ class RayDAPOTrainer(RayPPOTrainer):
         num_prompt_in_batch = 0
         num_gen_batches = 0
         current_epoch = self.global_steps // len(self.train_dataloader)
+
+        # [SW] 
+        # Real-epoch wallclock tracking: some datasets (e.g. dapo-math-17k) duplicate
+        # every unique problem N times to inflate the nominal epoch count, so a single
+        # dataloader epoch already covers N real epochs. Track cost per real epoch instead.
+        self.dedup_factor = self._compute_dedup_factor()
+        self.steps_per_real_epoch = len(self.train_dataloader) / self.dedup_factor
+        self._real_epoch_next_boundary = self.steps_per_real_epoch
+        self._real_epoch_accum_time = 0.0
+        self._real_epoch_durations = []
+        print(
+            f"[REAL-EPOCH] dedup_factor={self.dedup_factor}, "
+            f"steps_per_real_epoch={self.steps_per_real_epoch:.2f}"
+        )
 
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
@@ -449,6 +497,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 kept_traj_idxs.append(idx)
 
                         new_batch = new_batch[kept_traj_idxs]
+                        new_batch.meta_info.pop("timing", None)
+                        if batch is not None:
+                            batch.meta_info.pop("timing", None)
                         batch = new_batch if batch is None else DataProto.concat([batch, new_batch])
 
                         prompt_bsz = self.config.data.train_batch_size
@@ -676,6 +727,32 @@ class RayDAPOTrainer(RayPPOTrainer):
                 steps_duration = timing_raw.get("step", 0)
                 self.max_steps_duration = max(self.max_steps_duration, steps_duration)
 
+                # [SW]
+                # Real-epoch wallclock tracking. Exclude checkpoint save / ref-sync
+                # overhead: these fire on their own step cadence (not aligned to real
+                # epoch boundaries) and would otherwise dominate the per-epoch variance.
+                pure_step_duration = steps_duration - timing_raw.get("save_checkpoint", 0) - timing_raw.get(
+                    "sync_ref_from_actor", 0
+                )
+                self._real_epoch_accum_time += pure_step_duration
+                if self.global_steps >= self._real_epoch_next_boundary:
+                    self._real_epoch_durations.append(self._real_epoch_accum_time)
+                    real_epoch_idx = len(self._real_epoch_durations)
+                    # first real epoch includes one-time warmup (engine init, cuda graph
+                    # capture, ...) so it's excluded from the running average
+                    steady_state = self._real_epoch_durations[1:]
+                    avg_epoch_time = sum(steady_state) / len(steady_state) if steady_state else None
+                    tqdm.write(
+                        f"[REAL-EPOCH] #{real_epoch_idx} done at step={self.global_steps} "
+                        f"wallclock={self._real_epoch_accum_time:.1f}s"
+                        + (f" running_avg(excl. first)={avg_epoch_time:.1f}s" if avg_epoch_time else "")
+                    )
+                    metrics["timing/real_epoch_seconds"] = self._real_epoch_accum_time
+                    if avg_epoch_time is not None:
+                        metrics["timing/real_epoch_seconds_avg"] = avg_epoch_time
+                    self._real_epoch_accum_time = 0.0
+                    self._real_epoch_next_boundary += self.steps_per_real_epoch
+
                 # collect metrics
                 metrics.update(compute_data_metrics(batch=batch, use_critic=self.use_critic))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
@@ -696,6 +773,7 @@ class RayDAPOTrainer(RayPPOTrainer):
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
                     pprint(f"Final validation metrics: {last_val_metrics}")
+                    self._log_real_epoch_summary()
                     progress_bar.close()
                     return
 
@@ -712,3 +790,5 @@ class RayDAPOTrainer(RayPPOTrainer):
                 self._save_checkpoint()
             metrics = {f"timing/{k}": v for k, v in timing_raw.items()}
             logger.log(data=metrics, step=self.global_steps)
+
+        self._log_real_epoch_summary()

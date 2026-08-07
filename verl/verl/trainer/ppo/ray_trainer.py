@@ -630,9 +630,11 @@ class RayPPOTrainer:
 
         self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
 
-        # dump generations
+        # SW: dump validation generations (aligned with checkpoint save cadence, not every validation)
+        # 기존 존재하지만 사용 안 하던 로직을 arg 추가하여 사용하도록 함
         val_data_dir = self.config.trainer.get("validation_data_dir", None)
-        if val_data_dir:
+        save_freq = self.config.trainer.get("save_freq", -1)
+        if val_data_dir and save_freq > 0 and self.global_steps % save_freq == 0:
             self._dump_generations(
                 inputs=sample_inputs,
                 outputs=sample_outputs,
@@ -911,7 +913,7 @@ class RayPPOTrainer:
         # sleep all replicas to load checkpoint
         self.checkpoint_manager.sleep_replicas()
 
-    def _save_checkpoint(self):
+    def _save_checkpoint(self, batch: DataProto = None, reward_extra_infos_dict: dict = None):
         from verl.utils.fs import local_mkdir_safe
 
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -1708,7 +1710,7 @@ class RayPPOTrainer:
                             if esi_close_to_expiration:
                                 print("Force saving checkpoint: ESI instance expiration approaching.")
                             with marked_timer("save_checkpoint", timing_raw, color="green"):
-                                self._save_checkpoint()
+                                self._save_checkpoint(batch=batch, reward_extra_infos_dict=reward_extra_infos_dict)
 
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
