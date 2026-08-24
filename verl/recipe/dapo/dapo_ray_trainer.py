@@ -295,7 +295,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                 #SOO: clip, normalize, whiten, or normalize_prm of icm.
                 eta = eta_arr[data_idx]  # SW: this row's (group's) eta
                 if icm_calculation == "clip":
-                    scaled = float(eta * np.clip(raw, 0.0, 1.0))
+                    # scaled = float(eta * np.clip(raw, 0.0, 1.0))
+                    scaled = float(np.clip(eta * raw, 0.0, 0.5))  # [SW] use raw icm then clip
+                elif icm_calculation == "raw":  # [SW] use raw icm without any processing, only multiply eta
+                    scaled = float(eta * raw)
                 elif icm_calculation == "normalize":
                     normalized = (raw - r_min) / (r_max - r_min + 1e-8)
                     scaled = float(eta * normalized)
@@ -881,10 +884,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                     metrics.update(val_metrics)
 
                 # n=16 validation every 10 steps for pass@16 metrics
-                if self.global_steps % 10 == 0:
-                    with marked_timer("testing_n16", timing_raw, "green"):
-                        val_metrics_n16: dict = self._validate(n_val=16)
-                    metrics.update(val_metrics_n16)
+                # if self.global_steps % 2 == 0:  # [SW] debugging 용 2step마다 진행
+                with marked_timer("testing_n64", timing_raw, "green"):
+                    val_metrics_n64: dict = self._validate(n_val=64)
+                metrics.update(val_metrics_n64)
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (

@@ -25,6 +25,7 @@ from pathlib import Path
 from data.aime_loader import load_aime
 from sampling import VLLMSampler
 from metrics.distinct_equations import distinct_equations_score
+from metrics.pass_at_k import score_pass_at_k
 from metrics.rpd import RPDScorer
 
 
@@ -99,7 +100,11 @@ def main():
     de_mean = sum(d["distinct_eq"] for d in de_per_q) / max(len(de_per_q), 1)
     print(f"[metric] Distinct Equations (mean over {len(de_per_q)} q): {de_mean:.4f}")
 
-    # -------------------- 3b. RPD --------------------
+    # -------------------- 3b. Pass@k --------------------
+    passk_result = score_pass_at_k(problems, rollouts)
+    print(f"[metric] pass@k: { {k: round(v, 4) for k, v in passk_result['pass@k'].items()} }")
+
+    # -------------------- 3c. RPD --------------------
     rpd_per_q = []
     rpd_mean = None
     if not args.skip_rpd:
@@ -160,6 +165,7 @@ def main():
             "mean": de_mean,
             "per_question": de_per_q,
         },
+        "pass_at_k": passk_result,
         "rpd": {
             "mean": rpd_mean,
             "per_question": rpd_per_q,

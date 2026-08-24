@@ -33,8 +33,8 @@ echo "[INFO] RAY_BIN=${RAY_BIN}"
 DEBUG=${DEBUG:-false}
 # ────────────────────────────────────────────────────────────────────────────
 
-project_name='CDRL-Qwen3-4B-Base-dapo17k'
-exp_name='DAPO-stepCuriosity-Qwen3-4B-Base'
+project_name='CDRL-DAPO-Qwen3-4B-Base'
+exp_name='stepCuriosity-17k-1x'
 
 adv_estimator=grpo
 
@@ -66,7 +66,7 @@ if [[ "${DEBUG}" == "true" ]]; then
     exp_name="${exp_name}-debug32"
     train_prompt_bsz=32
     gen_prompt_bsz=32
-    train_prompt_mini_bsz=8
+    train_prompt_mini_bsz=32
     RESUME_MODE="disable"
     RESUME_FROM_PATH=""
     echo "[DEBUG] Overfit mode: 32 fixed samples, fresh start"
@@ -89,7 +89,7 @@ TEST_FILE=${TEST_FILE:-"${DATA_HOME_PATH}/aime-2024.parquet"}
 
 # Resume: auto-detect latest checkpoint from latest_checkpointed_iteration.txt
 # Set FRESH_START=true to ignore checkpoints and start from step 0.
-FRESH_START=${FRESH_START:-false}
+FRESH_START=${FRESH_START:-true}
 LATEST_ITER_FILE="${CKPTS_DIR}/latest_checkpointed_iteration.txt"
 if [[ "${FRESH_START}" == "true" ]]; then
     RESUME_MODE="disable"
@@ -135,13 +135,13 @@ use_curiosity=True
 overload_actor_to_ref=False
 overload_actor_to_ref_freq=100
 STEP_SEP="Step"
-icm_intermediate_size=8192
+icm_intermediate_size=9728
 icm_lr=1e-4
 icm_lr_scheduler_type="linear"
 icm_warmup_steps=10
 icm_intrinsic_reward_token="last_step_token" # "last_step_token" or "all_step_tokens"
 icm_calculation="normalize_prm" # "clip" or "normalize" or "whiten" or "normalize_prm" or "whiten_prm"
-icm_eta=0.5
+icm_eta=2.5
 variance_gated_curiosity=False  #SW: replace fixed icm_eta/eta_token/eta_answer with per-group rollout-correctness std
 dynamic_eta_coefficient=1.0  #SW: total_reward = extrinsic_reward + dynamic_eta_coefficient * dynamic_eta * intrinsic_reward
 dynamic_eta_beta=10.0  #SW: saturating exponential reshape of the raw std eta; 0/null disables it
@@ -251,9 +251,10 @@ eta_answer=0.1                   #SOO: answer level ICM
     trainer.nnodes="${NNODES}" \
     trainer.val_before_train=True \
     trainer.test_freq=5 \
-    trainer.save_freq=50 \
-    trainer.total_epochs=$([ "${DEBUG}" == "true" ] && echo 10 || echo 50) \
+    trainer.save_freq=30 \
+    trainer.total_epochs=$([ "${DEBUG}" == "true" ] && echo 10 || echo 100) \
     trainer.default_local_dir="${CKPTS_DIR}" \
+    trainer.validation_data_dir="${CKPTS_DIR}" \
     trainer.resume_mode=${RESUME_MODE} \
     ${RESUME_FROM_PATH:+trainer.resume_from_path="${RESUME_FROM_PATH}"} \
     trainer.save_curiosity_scores=True \

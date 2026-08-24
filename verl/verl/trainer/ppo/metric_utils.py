@@ -472,6 +472,17 @@ def bootstrap_metric(
     return result
 
 
+def calc_pass_k(n: int, c: int, k: int) -> float:
+    """Unbiased pass@k estimator (Chen et al. 2021, Codex): 1 - C(n-c, k) / C(n, k).
+
+    n: number of samples drawn for a prompt, c: number of correct samples among them, k <= n.
+    Exact (no bootstrap sampling noise), unlike best@k below.
+    """
+    if n - c < k:
+        return 1.0
+    return 1.0 - float(np.prod(1.0 - k / np.arange(n - c + 1, n + 1)))
+
+
 def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> float:
     """
     Calculate a value based on majority voting.
@@ -544,6 +555,10 @@ def process_validation_metrics(
         - "worst@N/std": Standard deviation of the worst values in bootstrap samples
         - "maj@N/mean": Mean of majority voting results in bootstrap samples (if "pred" exists)
         - "maj@N/std": Standard deviation of majority voting results (if "pred" exists)
+          (best/worst/maj are capped at N=16 even if n_resps is larger -- see bootstrap_n_cap)
+        - "pass@N/mean": Unbiased pass@N estimate (Chen et al. 2021), for variables whose
+          values are all 0/1 (e.g. "acc"). Exact -- no bootstrap sampling noise, so unlike
+          best@N it is uncapped: reports every doubling of N up to n_resps (1, 2, 4, 8, ...).
 
     Example:
         >>> data_sources = ["source1", "source1", "source2"]
@@ -562,23 +577,43 @@ def process_validation_metrics(
 
     np_mean = np.mean
     np_std = np.std
+    np_sum = np.sum
     reduce_fns_best_worst = [np.max, np.min]
     n_bootstrap = 1000
 
     # 2. cache ns list
+    # Bootstrap-based best/worst/maj stay capped at 16 samples even when more were drawn
+    # (e.g. an n=64 validation pass) -- bootstrapping gets noisier and more expensive at
+    # larger subset sizes, and pass@k (exact, see gen_ks below) covers that range instead.
+    bootstrap_n_cap = 32
+
     def gen_ns(n_resps: int) -> list[int]:
         if n_resps <= 1:
             return []
+        cap = min(n_resps, bootstrap_n_cap)
         ns = []
-        n = 2
-        while n < n_resps:
-            if n not in (4, 8):
-                ns.append(n)
+        n = 8
+        while n < cap:
+            ns.append(n)
             n *= 2
-        ns.append(n_resps)
+        ns.append(cap)
         return ns
 
+    # pass@k reports every doubling (no bootstrap cost to skip 4/8 for, unlike best/worst/maj)
+    def gen_ks(n_resps: int) -> list[int]:
+        if n_resps <= 1:
+            return []
+        ks = []
+        k = 1
+        while k < n_resps:
+            if k not in (2, 4):
+                ks.append(k)
+            k *= 2
+        ks.append(n_resps)
+        return ks
+
     ns_cache = {}
+    ks_cache = {}
 
     # 3. cache metric results
     data_src2uid2var2metric = {}
@@ -602,18 +637,29 @@ def process_validation_metrics(
                 n_resps = len(var_vals)
                 metric = {f"mean@{n_resps}": float(np_mean(var_vals))}
 
+                # pass@k only makes sense for 0/1-valued (correctness) variables, e.g. "acc"
+                is_binary = bool(np.isin(var_vals, [0, 1]).all())
+                if is_binary:
+                    num_correct = int(np_sum(var_vals))
+                    metric["pass@1/mean"] = calc_pass_k(n_resps, num_correct, 1)
+
                 if n_resps > 1:
                     metric[f"std@{n_resps}"] = float(np_std(var_vals))
+
+                    if is_binary:
+                        if n_resps not in ks_cache:
+                            ks_cache[n_resps] = gen_ks(n_resps)
+                        for k in ks_cache[n_resps]:
+                            metric[f"pass@{k}/mean"] = calc_pass_k(n_resps, num_correct, k)
 
                     # cache ns list
                     if n_resps not in ns_cache:
                         ns_cache[n_resps] = gen_ns(n_resps)
                     ns = ns_cache[n_resps]
 
-                    # compute best/worst metrics
+                    # compute best/worst/mean metrics
                     for n in ns:
-                        # compute best/worst metrics
-                        (bon_mean, bon_std), (won_mean, won_std) = bootstrap_metric(
+                        (bon_mean, bon_std), (won_mean, won_std)= bootstrap_metric(
                             data=var_vals,
                             subset_size=n,
                             reduce_fns=reduce_fns_best_worst,
