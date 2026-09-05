@@ -31,6 +31,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 
 # This cluster's GPUs report compute capability 12.0 but the system-wide
@@ -93,6 +94,24 @@ def parse_args():
                    help="Cosine-similarity threshold for merging two correct "
                         "solutions into the same UCC cluster.")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--wandb-project", default=None,
+                   help="If set, log the eval_summary metrics to this wandb project.")
+    p.add_argument("--wandb-run-name", default=None,
+                   help="wandb run name. With --wandb-id, repeated invocations "
+                        "(one per checkpoint) resume the same run instead of "
+                        "creating a new one each time.")
+    p.add_argument("--wandb-id", default=None,
+                   help="wandb run id to resume across repeated eval invocations, "
+                        "so every checkpoint's metrics land in one run.")
+    p.add_argument("--wandb-step", type=int, default=None,
+                   help="Training global_step to log metrics under (x-axis). "
+                        "Defaults to the N parsed out of a 'global_step_N' path "
+                        "component in --model-path.")
+    p.add_argument("--problem-id", default=None,
+                   help="Restrict the run to a single problem (matches the "
+                        "dataset's 'id' field, e.g. 2024-I-2). Useful for "
+                        "sampling many rollouts (--n-samples 100+) on just "
+                        "one problem to inspect Correct Answer Clustering.")
     return p.parse_args()
 
 
@@ -114,6 +133,12 @@ def main():
     # -------------------- 1. Load data --------------------
     problems = load_aime(args.dataset)  # List[{"id", "problem", "answer"}]
     print(f"[data] loaded {len(problems)} problems from {args.dataset}")
+
+    if args.problem_id is not None:
+        problems = [p for p in problems if str(p["id"]) == args.problem_id]
+        if not problems:
+            raise ValueError(f"--problem-id {args.problem_id!r} not found in {args.dataset}")
+        print(f"[data] restricted to problem_id={args.problem_id!r} (1 problem)")
     print(f"[1st problem] {problems[0]}")
 
     # -------------------- 2. Sample responses --------------------
@@ -299,6 +324,39 @@ def main():
     summary_path = out_dir / "eval_summary.json"
     summary_path.write_text(json.dumps(summary, indent=2))
     print(f"[done] wrote {summary_path}")
+
+    # -------------------- 5. wandb --------------------
+    if args.wandb_project:
+        step = args.wandb_step
+        if step is None:
+            m = re.search(r"global_step_(\d+)", args.model_path)
+            step = int(m.group(1)) if m else None
+
+        import wandb
+        wandb.init(
+            project=args.wandb_project,
+            name=args.wandb_run_name,
+            id=args.wandb_id,
+            resume="allow" if args.wandb_id else None,
+        )
+        log_dict = {}
+        if accuracy_per_k is not None:
+            for k, m in accuracy_per_k.items():
+                log_dict[f"eval/avg@{k}"] = m["avg"]
+                log_dict[f"eval/pass@{k}"] = m["pass"]
+                if m["potential"] is not None:
+                    log_dict[f"eval/potential@{k}"] = m["potential"]
+        if ucc_per_k is not None:
+            for k, v in ucc_per_k.items():
+                log_dict[f"eval/ucc@{k}"] = v
+        if bleu_mean is not None:
+            log_dict["eval/textual_diversity"] = bleu_mean
+        log_dict["eval/distinct_equations"] = de_mean
+        if rpd_mean is not None:
+            log_dict["eval/rpd"] = rpd_mean
+        wandb.log(log_dict, step=step)
+        wandb.finish()
+        print(f"[wandb] logged {log_dict} at step={step}")
 
 
 if __name__ == "__main__":

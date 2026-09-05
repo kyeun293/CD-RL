@@ -30,9 +30,14 @@ def embed_texts(texts: Sequence[str], model: str) -> np.ndarray:
         )
         _ST_MODEL_NAME = model
 
+    # batch_size=64 OOMs on realistic Long-CoT rollouts (up to several
+    # thousand tokens each): SDPA attention memory scales with
+    # batch_size * seq_len^2, and a batch of 64 padded to the longest
+    # sequence can require tens of GB in a single allocation regardless of
+    # total free GPU memory. A small batch keeps peak memory bounded.
     return _ST_MODEL.encode(
         list(texts),
-        batch_size=64,
+        batch_size=8,
         convert_to_numpy=True,
         normalize_embeddings=True,
         show_progress_bar=False,
